@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use std::{str::FromStr, string::ToString};
-use strum::{Display, EnumIter, EnumMessage, EnumString, EnumVariantNames, VariantNames};
+use strum::{Display, EnumIter, EnumMessage, EnumString, VariantNames};
 
 pub const CURL_UA: &str = "curl/7.54.0";
 
@@ -30,7 +30,7 @@ pub struct Cli {
     pub progressbar: bool,
 
     /// Select the preferred processing mode for StreamsCharts
-    #[clap(short, long, arg_enum)]
+    #[clap(short, long)]
     pub mode: Option<ProcessingType>,
 
     #[clap(subcommand)]
@@ -50,9 +50,7 @@ impl Default for Cli {
     }
 }
 
-#[derive(
-    Subcommand, Clone, Debug, EnumMessage, EnumIter, Display, EnumVariantNames, EnumString,
-)]
+#[derive(Subcommand, Clone, Debug, EnumMessage, EnumIter, Display, VariantNames, EnumString)]
 pub enum Commands {
     /// Combine all the parts (streamer's username, VOD/broadcast ID and a timestamp) into a proper m3u8 URL and check whether the VOD is available
     Exact {

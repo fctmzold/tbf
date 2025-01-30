@@ -54,8 +54,8 @@ impl Commands {
                     Err(e) => Err(e)?,
                 };
 
-                ask_for_value("Please enter the first timestamp:", from);
-                ask_for_value("Please enter the last timestamp:", to);
+                ask_for_value("Please enter the first timestamp: [year]-[month]-[day] [hour]:[minute]:[second]", from);
+                ask_for_value("Please enter the last timestamp: [year]-[month]-[day] [hour]:[minute]:[second]", to);
 
                 Ok(())
             }
@@ -258,58 +258,57 @@ pub fn main_interface(mut matches: Cli) {
         ..matches
     };
 
-    let mut mode = String::new();
+    loop {
+        let mut mode = String::new();
 
-    println!("Select the application mode:");
-    for (i, com) in Commands::iter().enumerate() {
-        let selector = match com.to_selector() {
-            Some(str) => str,
-            None => (i + 1).to_string(),
-        };
-        let name = com.to_short_desc();
+        println!("Select the application mode:");
+        for (i, com) in Commands::iter().enumerate() {
+            let selector = match com.to_selector() {
+                Some(str) => str,
+                None => (i + 1).to_string(),
+            };
+            let name = com.to_short_desc();
 
-        match com.show_description() {
-            true => println!(
-                "[{}] {} - {}",
-                selector,
-                name,
-                com.get_documentation()
-                    .unwrap_or("<error - couldn't get mode description>")
-            ),
-            false => println!("[{}] {}", selector, name,),
+            match com.show_description() {
+                true => println!(
+                    "[{}] {} - {}",
+                    selector,
+                    name,
+                    com.get_documentation()
+                        .unwrap_or("<error - couldn't get mode description>")
+                ),
+                false => println!("[{}] {}", selector, name,),
+            }
+        }
+
+        stdin().read_line(&mut mode).expect("Failed to read line.");
+        trim_newline(&mut mode);
+
+        match Commands::from_selector(mode) {
+            Some(mut sub) => {
+                match sub.fill_out_values() {
+                    Err(e) => {
+                        error!("{}", e);
+                        continue;
+                    }
+                    _ => (),
+                }
+                let valid_urls = match sub.execute(matches.clone()) {
+                    Ok(u) => match u {
+                        Some(u) => u,
+                        None => Vec::new(),
+                    },
+                    Err(e) => {
+                        error!("{}", e);
+                        continue;
+                    }
+                };
+                try_to_fix(valid_urls, matches.clone());
+            }
+            None => {
+                error!("Couldn't select the specified mode");
+                continue;
+            }
         }
     }
-
-    stdin().read_line(&mut mode).expect("Failed to read line.");
-    trim_newline(&mut mode);
-
-    (|| match Commands::from_selector(mode) {
-        Some(mut sub) => {
-            match sub.fill_out_values() {
-                Err(e) => {
-                    error!("{}", e);
-                    return;
-                }
-                _ => (),
-            }
-            let valid_urls = match sub.execute(matches.clone()) {
-                Ok(u) => match u {
-                    Some(u) => u,
-                    None => Vec::new(),
-                },
-                Err(e) => {
-                    error!("{}", e);
-                    return;
-                }
-            };
-            try_to_fix(valid_urls, matches);
-            return;
-        }
-        None => {
-            error!("Couldn't select the specified mode");
-            return;
-        }
-    })();
-
-    any_key_to_continue("Press any key to close...");
 }

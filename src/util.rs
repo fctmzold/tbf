@@ -2,6 +2,7 @@ use anyhow::Result;
 use lazy_static::lazy_static;
 use log::debug;
 use log::info;
+use rand::prelude::IndexedMutRandom;
 use rand::seq::SliceRandom;
 use regex::Regex;
 use reqwest::header::USER_AGENT;
@@ -12,7 +13,6 @@ use time::{
     format_description::well_known::Rfc3339, macros::format_description, PrimitiveDateTime,
 };
 use url::Url;
-
 use super::config::{Cli, ProcessingType, CURL_UA};
 use crate::error::DeriveDateError;
 use crate::twitch::models::CDN_URLS;
@@ -78,10 +78,10 @@ pub fn get_useragent_list() -> Vec<String> {
 }
 
 pub fn get_random_useragent() -> String {
-    let ua_vector = get_useragent_list();
+    let mut ua_vector = get_useragent_list();
 
     if !ua_vector.is_empty() {
-        match ua_vector.choose(&mut rand::thread_rng()) {
+        match ua_vector.choose_mut(&mut rand::thread_rng()) {
             Some(ua) => ua.to_owned(),
             None => CURL_UA.to_string(),
         }

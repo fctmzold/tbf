@@ -1,10 +1,6 @@
 use anyhow::Result;
-use crossterm::{
-    event::{self, Event},
-    terminal::{disable_raw_mode, enable_raw_mode},
-};
 use log::error;
-use std::io::{stdin, stdout, Write};
+use std::io::stdin;
 use strum::{EnumMessage, IntoEnumIterator};
 
 use crate::config::{Cli, Commands, ProcessingType};
@@ -208,18 +204,7 @@ pub fn trim_newline(s: &mut String) {
     }
 }
 
-fn any_key_to_continue(text: &str) {
-    enable_raw_mode().unwrap();
-    print!("\n{}", text);
-    stdout().flush().unwrap_or(());
-    loop {
-        match event::read().unwrap() {
-            Event::Key(..) => break,
-            _ => (),
-        };
-    }
-    disable_raw_mode().unwrap();
-}
+
 
 fn ask_for_value(desc: &str, buf: &mut String) {
     println!("{}", desc);

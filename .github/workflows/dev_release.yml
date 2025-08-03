@@ -2,7 +2,6 @@ name: Development Release
 
 permissions:
     contents: write
-    # id-token: write # Not used in this workflow, can be removed
     packages: write
     pull-requests: read
 
@@ -12,12 +11,9 @@ on:
             - main
 
 jobs:
-    # This job creates a new pre-release tagged 'dev+<commit_hash>'
-    # and cleans up the previous development release.
     create-dev-release:
         runs-on: ubuntu-latest
         outputs:
-            # We need to output the commit hash so the next job can use the exact same tag
             commit_hash: ${{ steps.commit.outputs.short }}
         steps:
             - name: Clean up older development releases
@@ -28,16 +24,12 @@ jobs:
                   delete_tag_pattern: dev+
               env:
                   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
             - name: Get current date and commit hash
               id: commit
               uses: pr-mpt/actions-commit-hash@v1
-
             - name: Get current time
               id: date
-              # Updated to use modern GITHUB_OUTPUT to avoid deprecation warnings
               run: echo "date_utc=$(TZ='UTC' date +'%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_OUTPUT
-
             - name: Create Pre-Release
               uses: "marvinpinto/action-automatic-releases@latest"
               with:
@@ -46,10 +38,7 @@ jobs:
                   prerelease: true
                   title: "Development Build - ${{ steps.date.outputs.date_utc }} - dev+${{ steps.commit.outputs.short }}"
 
-    # This job builds the binaries for all platforms and uploads them
-    # to the pre-release created in the previous job.
     upload-assets:
-        # It must wait for the release to be created first
         needs: create-dev-release
         strategy:
             matrix:
@@ -69,18 +58,31 @@ jobs:
         runs-on: ${{ matrix.os }}
         steps:
             - name: Checkout repository
-              uses: actions/checkout@v4 # --- IMPROVEMENT ---
+              uses: actions/checkout@v4
 
-            # --- START: ADDED STEPS TO FIX BUILD ---
             - name: Install MinGW for Windows GNU target
               if: runner.os == 'Windows'
               run: choco install mingw --no-progress
+
+            - name: Install Android NDK for Android target
+              if: matrix.target == 'aarch64-linux-android'
+              uses: nttld/setup-ndk@v1
+              with:
+                  ndk-version: r25b
 
             - name: Install Rust toolchain
               uses: dtolnay/rust-toolchain@stable
               with:
                   toolchain: stable
                   targets: ${{ matrix.target }}
+
+            - name: Configure Cargo for Android
+              if: matrix.target == 'aarch64-linux-android'
+              run: |
+                  mkdir -p .cargo
+                  echo '[target.aarch64-linux-android]' >> .cargo/config.toml
+                  echo 'linker = "${{ env.ANDROID_NDK_LATEST_HOME }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android29-clang"' >> .cargo/config.toml
+                  echo 'ar = "${{ env.ANDROID_NDK_LATEST_HOME }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android-ar"' >> .cargo/config.toml
 
             - name: Cache Cargo dependencies
               uses: actions/cache@v4
@@ -94,11 +96,10 @@ jobs:
                   key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
                   restore-keys: |
                       ${{ runner.os }}-cargo-${{ matrix.target }}-
-            # --- END: ADDED STEPS TO FIX BUILD ---
+
             - name: Build and upload Rust binary
               uses: taiki-e/upload-rust-binary-action@v1
               with:
-                  # Use the tag created in the 'create-dev-release' job
                   ref: refs/tags/dev+${{ needs.create-dev-release.outputs.commit_hash }}
                   bin: tbf
                   include: LICENSE,README.md

@@ -13,19 +13,16 @@ on:
     workflow_dispatch:
 
 jobs:
-    # Job to create a DRAFT release. This prevents a published release
-    # from appearing before all assets are built and uploaded.
+    # Job to create a DRAFT release using the official GitHub CLI.
     create-release:
         runs-on: ubuntu-latest
         steps:
-            - name: Create Draft Release
-              uses: taiki-e/create-gh-release-action@v1
-              with:
-                  branch: main
-                  draft: true
-                  generate_release_notes: true
+            - name: Create Draft Release with Auto-Generated Notes
               env:
                   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  # The tag name is available from the event that triggered the workflow
+                  TAG_NAME: ${{ github.ref_name }}
+              run: gh release create "$TAG_NAME" --draft --generate-notes
 
     # Job to build and upload binaries for multiple platforms
     upload-assets:
@@ -50,8 +47,6 @@ jobs:
             - name: Checkout repository
               uses: actions/checkout@v4
 
-            # Install the MinGW toolchain, which is required for the windows-gnu target.
-            # This step only runs on the Windows runner.
             - name: Install MinGW for Windows GNU target
               if: runner.os == 'Windows'
               run: choco install mingw --no-progress
@@ -79,6 +74,7 @@ jobs:
               uses: taiki-e/upload-rust-binary-action@v1
               with:
                   bin: tbf
+                  ref: ${{ github.ref }}
                   include: LICENSE,README.md
                   target: ${{ matrix.target }}
                   archive: $bin-$tag-$target
@@ -93,10 +89,7 @@ jobs:
         needs: [create-release, upload-assets]
         steps:
             - name: Publish Release
-              uses: taiki-e/create-gh-release-action@v1
-              with:
-                  # Use the tag name from the event that triggered the workflow
-                  tag: ${{ github.ref_name }}
-                  draft: false
               env:
                   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  TAG_NAME: ${{ github.ref_name }}
+              run: gh release edit "$TAG_NAME" --draft=false

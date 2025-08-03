@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-pub static CDN_URLS: [&str; 28] = [
+pub static CDN_URLS: [&str; 29] = [
     "vod-secure.twitch.tv",
     "vod-metro.twitch.tv",
     "vod-pop-secure.twitch.tv",
@@ -29,6 +29,7 @@ pub static CDN_URLS: [&str; 28] = [
     "dykkng5hnh52u.cloudfront.net",
     "d2dylwb3shzel1.cloudfront.net",
     "d2xmjdvx03ij56.cloudfront.net",
+    "d3fi1amfgojobc.cloudfront.net"
 ];
 
 #[derive(Debug)]

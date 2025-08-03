@@ -46,7 +46,7 @@ pub fn update(matches: Cli) -> Result<()> {
         Err(e) => return Err(e)?,
     };
 
-    if gh.tag_name != "" && !gh.assets.is_empty() {
+    if !gh.tag_name.is_empty() && !gh.assets.is_empty() {
         gh.tag_name.remove(0);
         let new_version_parsed = Version::parse(&gh.tag_name).unwrap();
 
@@ -64,10 +64,8 @@ pub fn update(matches: Cli) -> Result<()> {
                     None => println!("{}", url.browser_download_url),
                 }
             }
-        } else {
-            if !matches.simple {
-                println!("No updates available");
-            }
+        } else if !matches.simple {
+            println!("No updates available");
         }
     }
 

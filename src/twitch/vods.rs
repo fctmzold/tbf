@@ -10,7 +10,7 @@ use reqwest::StatusCode;
 use sha1::{Digest, Sha1};
 
 use crate::config::Cli;
-use crate::error::PlaylistFixError;
+use crate::error::PlaylistFix;
 use crate::twitch::{
     check_availability,
     models::{ReturnURL, TwitchURL},
@@ -43,9 +43,9 @@ pub fn bruteforcer(
     }
     for number in number1..number2 + 1 {
         let mut hasher = Sha1::new();
-        hasher.update(format!("{}_{}_{}", username, vod, number).as_str());
+        hasher.update(format!("{username}_{vod}_{number}").as_str());
         let hex_vec = hasher.finalize();
-        let hex = format!("{:x}", hex_vec);
+        let hex = format!("{hex_vec:x}");
         let cdn_urls_compiled = compile_cdn_list(flags.cdnfile.clone());
         for cdn in cdn_urls_compiled {
             all_formats_vec.push(TwitchURL {
@@ -71,57 +71,57 @@ pub fn bruteforcer(
     let final_url: Option<&TwitchURL>;
     if flags.progressbar {
         final_url = iter_pb.find_any( |url| {
-            let res = crate::HTTP_CLIENT.get(&url.full_url.clone()).send();
+            let res = crate::HTTP_CLIENT.get(url.full_url.clone()).send();
             match res {
                 Ok(res) => {
                     match res.status() {
                         StatusCode::OK => {
                             if flags.verbose {
-                                cloned_pb.println(format!("Got it! - {:?}", url));
+                                cloned_pb.println(format!("Got it! - {url:?}"));
                             }
-                            return true
+                            true
                         }
                         StatusCode::FORBIDDEN | StatusCode::NOT_FOUND => {
                             if flags.verbose {
-                                cloned_pb.println(format!("Still going - {:?}", url));
+                                cloned_pb.println(format!("Still going - {url:?}"));
                             }
-                            return false
+                            false
                         }
                         _ => {
                             cloned_pb.println(format!("You might be getting throttled (or your connection is dead)! Status code: {} - URL: {}", res.status(), res.url()));
-                            return false
+                            false
                         }
                     }
                 },
                 Err(e) => {
-                    cloned_pb.println(format!("Reqwest error: {}", e));
-                    return false
+                    cloned_pb.println(format!("Reqwest error: {e}"));
+                    false
                 }
             }
         })
     } else {
         final_url = iter.find_any( |url| {
-            let res = crate::HTTP_CLIENT.get(&url.full_url.clone()).send();
+            let res = crate::HTTP_CLIENT.get(url.full_url.clone()).send();
             match res {
                 Ok(res) => {
                     match res.status() {
                         StatusCode::OK => {
-                            debug!("Got it! - {:?}", url);
-                            return true
+                            debug!("Got it! - {url:?}");
+                            true
                         }
                         StatusCode::FORBIDDEN | StatusCode::NOT_FOUND => {
-                            debug!("Still going - {:?}", url);
-                            return false
+                            debug!("Still going - {url:?}");
+                            false
                         }
                         _ => {
                             info(format!("You might be getting throttled (or your connection is dead)! Status code: {} - URL: {}", res.status(), res.url()), flags.simple);
-                            return false
+                            false
                         }
                     }
                 },
                 Err(e) => {
-                    info(format!("Reqwest error: {}", e), flags.simple);
-                    return false
+                    info(format!("Reqwest error: {e}"), flags.simple);
+                    false
                 }
             }
         });
@@ -179,9 +179,9 @@ pub fn exact(
     };
 
     let mut hasher = Sha1::new();
-    hasher.update(format!("{}_{}_{}", username, vod, number).as_str());
+    hasher.update(format!("{username}_{vod}_{number}").as_str());
     let hex_vec = hasher.finalize();
-    let hex = format!("{:x}", hex_vec);
+    let hex = format!("{hex_vec:x}");
     let valid_urls = check_availability(
         &hex[0..20].to_string(),
         username,
@@ -215,11 +215,11 @@ pub fn exact(
 pub fn fix(url: &str, output: Option<String>, old_method: bool, flags: Cli) -> Result<()> {
     if !(url.contains("twitch.tv") || url.contains("cloudfront.net")) {
         error!("Only twitch.tv and cloudfront.net URLs are supported");
-        return Err(PlaylistFixError::URLError)?;
+        Err(PlaylistFix::URL)?;
     }
 
     let mut base_url_parts: Vec<String> = Vec::new();
-    for elem in FIX_REGEX.captures_iter(&url) {
+    for elem in FIX_REGEX.captures_iter(url) {
         base_url_parts.push(elem[0].to_string());
     }
     let base_url = format!(
@@ -268,7 +268,7 @@ pub fn fix(url: &str, output: Option<String>, old_method: bool, flags: Cli) -> R
                         .progress_with(pb)
                         .for_each(|url| {
                             let mut remove_chars = 3;
-                            let res = crate::HTTP_CLIENT.get(&url.clone()).send().expect("Error");
+                            let res = crate::HTTP_CLIENT.get(url.clone()).send().expect("Error");
                             if res.status() == 403 {
                                 if url.contains("unmuted") {
                                     remove_chars = 11;
@@ -279,31 +279,28 @@ pub fn fix(url: &str, output: Option<String>, old_method: bool, flags: Cli) -> R
                                 );
                                 if flags.verbose {
                                     cloned_pb.println(format!(
-                                        "Found the muted version of this .ts file - {:?}",
-                                        url
+                                        "Found the muted version of this .ts file - {url:?}"
                                     ))
                                 }
-                            } else if res.status() == 200 {
-                                if flags.verbose {
+                            } else if res.status() == 200
+                                && flags.verbose {
                                     cloned_pb.println(format!(
-                                        "Found the unmuted version of this .ts file - {:?}",
-                                        url
+                                        "Found the unmuted version of this .ts file - {url:?}"
                                     ))
                                 }
-                            }
                         });
                 } else {
                     initial_url_vec.par_iter_mut().for_each(|url| {
                         let mut remove_chars = 3;
-                        let res = crate::HTTP_CLIENT.get(&url.clone()).send().expect("Error");
+                        let res = crate::HTTP_CLIENT.get(url.clone()).send().expect("Error");
                         if res.status() == 403 {
                             if url.contains("unmuted") {
                                 remove_chars = 11;
                             }
                             *url = format!("{}-muted.ts", &url.clone()[..url.len() - remove_chars]);
-                            debug!("Found the muted version of this .ts file - {:?}", url)
+                            debug!("Found the muted version of this .ts file - {url:?}")
                         } else if res.status() == 200 {
-                            debug!("Found the unmuted version of this .ts file - {:?}", url)
+                            debug!("Found the unmuted version of this .ts file - {url:?}")
                         }
                     });
                 }
@@ -317,63 +314,59 @@ pub fn fix(url: &str, output: Option<String>, old_method: bool, flags: Cli) -> R
                     });
                     debug!("Added this .ts file - {:?}", initial_url_vec[i])
                 }
-            } else {
-                if flags.progressbar {
-                    let pb = ProgressBar::new(pl.segments.len() as u64);
-                    let cloned_pb = pb.clone();
-                    for segment in pl.segments.iter().progress_with(pb) {
-                        let url = format!("{}{}", base_url, segment.uri);
-                        if segment.uri.contains("unmuted") {
-                            let muted_url = format!("{}-muted.ts", &url.clone()[..url.len() - 11]);
-                            playlist.segments.push(MediaSegment {
-                                uri: muted_url.clone(),
-                                duration: segment.duration,
-                                ..Default::default()
-                            });
-                            if flags.verbose {
-                                cloned_pb.println(format!(
-                                    "Found the muted version of this .ts file - {:?}",
-                                    url
-                                ))
-                            }
-                        } else {
-                            playlist.segments.push(MediaSegment {
-                                uri: url.clone(),
-                                duration: segment.duration,
-                                ..Default::default()
-                            });
-                            if flags.verbose {
-                                cloned_pb.println(format!(
-                                    "Found the unmuted version of this .ts file - {:?}",
-                                    url
-                                ))
-                            }
+            } else if flags.progressbar {
+                let pb = ProgressBar::new(pl.segments.len() as u64);
+                let cloned_pb = pb.clone();
+                for segment in pl.segments.iter().progress_with(pb) {
+                    let url = format!("{}{}", base_url, segment.uri);
+                    if segment.uri.contains("unmuted") {
+                        let muted_url = format!("{}-muted.ts", &url.clone()[..url.len() - 11]);
+                        playlist.segments.push(MediaSegment {
+                            uri: muted_url.clone(),
+                            duration: segment.duration,
+                            ..Default::default()
+                        });
+                        if flags.verbose {
+                            cloned_pb.println(format!(
+                                "Found the muted version of this .ts file - {url:?}"
+                            ))
+                        }
+                    } else {
+                        playlist.segments.push(MediaSegment {
+                            uri: url.clone(),
+                            duration: segment.duration,
+                            ..Default::default()
+                        });
+                        if flags.verbose {
+                            cloned_pb.println(format!(
+                                "Found the unmuted version of this .ts file - {url:?}"
+                            ))
                         }
                     }
-                } else {
-                    for segment in pl.segments {
-                        let url = format!("{}{}", base_url, segment.uri);
-                        if segment.uri.contains("unmuted") {
-                            let muted_url = format!("{}-muted.ts", &url.clone()[..url.len() - 11]);
-                            playlist.segments.push(MediaSegment {
-                                uri: muted_url.clone(),
-                                duration: segment.duration,
-                                ..Default::default()
-                            });
-                            debug!("Found the muted version of this .ts file - {:?}", muted_url)
-                        } else {
-                            playlist.segments.push(MediaSegment {
-                                uri: url.clone(),
-                                duration: segment.duration,
-                                ..Default::default()
-                            });
-                            debug!("Found the unmuted version of this .ts file - {:?}", url)
-                        }
+                }
+            } else {
+                for segment in pl.segments {
+                    let url = format!("{}{}", base_url, segment.uri);
+                    if segment.uri.contains("unmuted") {
+                        let muted_url = format!("{}-muted.ts", &url.clone()[..url.len() - 11]);
+                        playlist.segments.push(MediaSegment {
+                            uri: muted_url.clone(),
+                            duration: segment.duration,
+                            ..Default::default()
+                        });
+                        debug!("Found the muted version of this .ts file - {muted_url:?}")
+                    } else {
+                        playlist.segments.push(MediaSegment {
+                            uri: url.clone(),
+                            duration: segment.duration,
+                            ..Default::default()
+                        });
+                        debug!("Found the unmuted version of this .ts file - {url:?}")
                     }
                 }
             }
         }
-        Err(e) => error!("Error in unmute(): {:?}", e),
+        Err(e) => error!("Error in unmute(): {e:?}"),
     }
 
     let path = match output {
@@ -400,7 +393,7 @@ pub fn live(username: &str, flags: Cli) -> Result<Option<Vec<ReturnURL>>> {
             Some((bid, stamp)) => exact(username, bid, stamp.as_str(), flags),
             None => Ok(None),
         },
-        Err(e) => return Err(e)?,
+        Err(e) => Err(e)?,
     }
 }
 
@@ -453,7 +446,7 @@ mod util {
             Ok(d) => d,
             Err(e) => {
                 if !flags.simple {
-                    error!("Couldn't get the info from the username: {}", e);
+                    error!("Couldn't get the info from the username: {e}");
                 }
                 return Ok(None);
             }

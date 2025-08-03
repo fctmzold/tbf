@@ -4,181 +4,181 @@ use time::error::Parse;
 use url::ParseError as UrlPError;
 
 #[derive(Debug)]
-pub enum PlaylistFixError {
-    ReqwestError(reqwest::Error),
-    IoError(std::io::Error),
-    URLError,
+pub enum PlaylistFix {
+    Reqwest(reqwest::Error),
+    Io(std::io::Error),
+    URL,
 }
 
-impl From<reqwest::Error> for PlaylistFixError {
+impl From<reqwest::Error> for PlaylistFix {
     fn from(e: reqwest::Error) -> Self {
-        Self::ReqwestError(e)
+        Self::Reqwest(e)
     }
 }
 
-impl From<std::io::Error> for PlaylistFixError {
+impl From<std::io::Error> for PlaylistFix {
     fn from(e: std::io::Error) -> Self {
-        Self::IoError(e)
+        Self::Io(e)
     }
 }
 
-impl Display for PlaylistFixError {
+impl Display for PlaylistFix {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::ReqwestError(e) => write!(f, "couldn't process the url: {}", e),
-            Self::IoError(e) => write!(f, "io error: {}", e),
-            Self::URLError => write!(f, "only twitch.tv and cloudfront.net URLs are supported"),
+            Self::Reqwest(e) => write!(f, "couldn't process the url: {e}"),
+            Self::Io(e) => write!(f, "io error: {e}"),
+            Self::URL => write!(f, "only twitch.tv and cloudfront.net URLs are supported"),
         }
     }
 }
 
-impl Error for PlaylistFixError {}
+impl Error for PlaylistFix {}
 
 #[derive(Debug)]
-pub enum VodError {
-    IntegerParseError(ParseIntError),
-    StringParseError(Parse),
-    HeaderNameError(InvalidHeaderName),
-    HeaderValueError(InvalidHeaderValue),
-    UrlProcessError(reqwest::Error),
+pub enum Vod {
+    IntegerParse(ParseIntError),
+    StringParse(Parse),
+    HeaderName(InvalidHeaderName),
+    HeaderValue(InvalidHeaderValue),
+    UrlProcess(reqwest::Error),
 }
 
-impl From<InvalidHeaderName> for VodError {
+impl From<InvalidHeaderName> for Vod {
     fn from(e: InvalidHeaderName) -> Self {
-        Self::HeaderNameError(e)
+        Self::HeaderName(e)
     }
 }
 
-impl From<InvalidHeaderValue> for VodError {
+impl From<InvalidHeaderValue> for Vod {
     fn from(e: InvalidHeaderValue) -> Self {
-        Self::HeaderValueError(e)
+        Self::HeaderValue(e)
     }
 }
 
-impl From<reqwest::Error> for VodError {
+impl From<reqwest::Error> for Vod {
     fn from(e: reqwest::Error) -> Self {
-        Self::UrlProcessError(e)
+        Self::UrlProcess(e)
     }
 }
 
-impl From<ParseIntError> for VodError {
+impl From<ParseIntError> for Vod {
     fn from(e: ParseIntError) -> Self {
-        Self::IntegerParseError(e)
+        Self::IntegerParse(e)
     }
 }
 
-impl From<Parse> for VodError {
+impl From<Parse> for Vod {
     fn from(e: Parse) -> Self {
-        Self::StringParseError(e)
+        Self::StringParse(e)
     }
 }
 
-impl Display for VodError {
+impl Display for Vod {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::IntegerParseError(e) => write!(f, "couldn't parse the unix timestamp: {}", e),
-            Self::StringParseError(e) => write!(f, "couldn't parse the string timestamp: {}", e),
-            Self::HeaderNameError(e) => write!(f, "invalid header name: {}", e),
-            Self::HeaderValueError(e) => write!(f, "invalid header value: {}", e),
-            Self::UrlProcessError(e) => write!(f, "couldn't process the url: {}", e),
+            Self::IntegerParse(e) => write!(f, "couldn't parse the unix timestamp: {e}"),
+            Self::StringParse(e) => write!(f, "couldn't parse the string timestamp: {e}"),
+            Self::HeaderName(e) => write!(f, "invalid header name: {e}"),
+            Self::HeaderValue(e) => write!(f, "invalid header value: {e}"),
+            Self::UrlProcess(e) => write!(f, "couldn't process the url: {e}"),
         }
     }
 }
 
-impl Error for VodError {}
+impl Error for Vod {}
 
 #[derive(Debug)]
-pub enum DeriveDateError {
-    SegmentMapError,
-    ScraperElementError,
-    ScraperAttributeError,
-    SelectorError,
-    TimestampParserError(VodError),
-    UrlProcessError(reqwest::Error),
-    UrlParseError(UrlPError),
-    WrongURLError(String),
+pub enum DeriveDate {
+    SegmentMap,
+    ScraperElement,
+    ScraperAttribute,
+    Selector,
+    TimestampParser(Vod),
+    UrlProcess(reqwest::Error),
+    UrlParse(UrlPError),
+    WrongURL(String),
 }
 
-impl From<VodError> for DeriveDateError {
-    fn from(e: VodError) -> Self {
-        Self::TimestampParserError(e)
+impl From<Vod> for DeriveDate {
+    fn from(e: Vod) -> Self {
+        Self::TimestampParser(e)
     }
 }
 
-impl From<UrlPError> for DeriveDateError {
+impl From<UrlPError> for DeriveDate {
     fn from(e: UrlPError) -> Self {
-        Self::UrlParseError(e)
+        Self::UrlParse(e)
     }
 }
 
-impl From<reqwest::Error> for DeriveDateError {
+impl From<reqwest::Error> for DeriveDate {
     fn from(e: reqwest::Error) -> Self {
-        Self::UrlProcessError(e)
+        Self::UrlProcess(e)
     }
 }
 
-impl Display for DeriveDateError {
+impl Display for DeriveDate {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::SegmentMapError => write!(f, "couldn't map the URL segments"),
-            Self::ScraperElementError => write!(f, "couldn't find the nth html element"),
-            Self::ScraperAttributeError => write!(f, "couldn't find the html attribute"),
-            Self::SelectorError => write!(f, "couldn't parse the selector"),
-            Self::TimestampParserError(e) => write!(f, "{}", e),
-            Self::UrlProcessError(e) => write!(f, "couldn't process the url: {}", e),
-            Self::WrongURLError(e) => write!(f, "{}", e),
-            Self::UrlParseError(e) => write!(f, "couldn't parse the url: {}", e),
+            Self::SegmentMap => write!(f, "couldn't map the URL segments"),
+            Self::ScraperElement => write!(f, "couldn't find the nth html element"),
+            Self::ScraperAttribute => write!(f, "couldn't find the html attribute"),
+            Self::Selector => write!(f, "couldn't parse the selector"),
+            Self::TimestampParser(e) => write!(f, "{e}"),
+            Self::UrlProcess(e) => write!(f, "couldn't process the url: {e}"),
+            Self::WrongURL(e) => write!(f, "{e}"),
+            Self::UrlParse(e) => write!(f, "couldn't parse the url: {e}"),
         }
     }
 }
 
-impl Error for DeriveDateError {}
+impl Error for DeriveDate {}
 
 #[derive(Debug)]
-pub enum ClipError {
-    IntegerParseError(ParseIntError),
-    SegmentMapError,
-    HeaderNameError(InvalidHeaderName),
-    HeaderValueError(InvalidHeaderValue),
-    WrongURLError(String),
-    UrlProcessError(reqwest::Error),
+pub enum Clip {
+    IntegerParse(ParseIntError),
+    SegmentMap,
+    HeaderName(InvalidHeaderName),
+    HeaderValue(InvalidHeaderValue),
+    WrongURL(String),
+    UrlProcess(reqwest::Error),
 }
 
-impl From<ParseIntError> for ClipError {
+impl From<ParseIntError> for Clip {
     fn from(e: ParseIntError) -> Self {
-        Self::IntegerParseError(e)
+        Self::IntegerParse(e)
     }
 }
 
-impl From<InvalidHeaderName> for ClipError {
+impl From<InvalidHeaderName> for Clip {
     fn from(e: InvalidHeaderName) -> Self {
-        Self::HeaderNameError(e)
+        Self::HeaderName(e)
     }
 }
 
-impl From<InvalidHeaderValue> for ClipError {
+impl From<InvalidHeaderValue> for Clip {
     fn from(e: InvalidHeaderValue) -> Self {
-        Self::HeaderValueError(e)
+        Self::HeaderValue(e)
     }
 }
 
-impl From<reqwest::Error> for ClipError {
+impl From<reqwest::Error> for Clip {
     fn from(e: reqwest::Error) -> Self {
-        Self::UrlProcessError(e)
+        Self::UrlProcess(e)
     }
 }
 
-impl Display for ClipError {
+impl Display for Clip {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::IntegerParseError(e) => write!(f, "couldn't parse the broadcast id: {}", e),
-            Self::SegmentMapError => write!(f, "couldn't map the URL segments"),
-            Self::HeaderNameError(e) => write!(f, "invalid header name: {}", e),
-            Self::HeaderValueError(e) => write!(f, "invalid header value: {}", e),
-            Self::WrongURLError(e) => write!(f, "{}", e),
-            Self::UrlProcessError(e) => write!(f, "couldn't process the url: {}", e),
+            Self::IntegerParse(e) => write!(f, "couldn't parse the broadcast id: {e}"),
+            Self::SegmentMap => write!(f, "couldn't map the URL segments"),
+            Self::HeaderName(e) => write!(f, "invalid header name: {e}"),
+            Self::HeaderValue(e) => write!(f, "invalid header value: {e}"),
+            Self::WrongURL(e) => write!(f, "{e}"),
+            Self::UrlProcess(e) => write!(f, "couldn't process the url: {e}"),
         }
     }
 }
 
-impl Error for ClipError {}
+impl Error for Clip {}

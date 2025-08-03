@@ -120,7 +120,7 @@ impl Commands {
                 to,
             } => bruteforcer(username.as_str(), *id, from.as_str(), to.as_str(), matches),
             Self::Link { url } => {
-                let (proc, data) = match derive_date_from_url(&url, matches.clone()) {
+                let (proc, data) = match derive_date_from_url(url, matches.clone()) {
                     Ok(a) => a,
                     Err(e) => {
                         return Err(e)?;
@@ -164,7 +164,7 @@ impl Commands {
             Self::Clip { clip } => match find_bid_from_clip(clip.clone(), matches.clone()) {
                 Ok(r) => match r {
                     Some((username, vod)) => {
-                        let url = format!("https://twitchtracker.com/{}/streams/{}", username, vod);
+                        let url = format!("https://twitchtracker.com/{username}/streams/{vod}");
                         let (_, data) = match derive_date_from_url(&url, matches.clone()) {
                             Ok(a) => a,
                             Err(e) => Err(e)?,
@@ -207,14 +207,14 @@ pub fn trim_newline(s: &mut String) {
 
 
 fn ask_for_value(desc: &str, buf: &mut String) {
-    println!("{}", desc);
+    println!("{desc}");
     stdin().read_line(buf).expect("Failed to read line.");
     trim_newline(buf);
 }
 
 fn try_to_fix(valid_urls: Vec<ReturnURL>, matches: Cli) {
-    if !valid_urls.is_empty() {
-        if valid_urls[0].muted {
+    if !valid_urls.is_empty()
+        && valid_urls[0].muted {
             let mut response = String::new();
 
             ask_for_value(
@@ -233,7 +233,6 @@ fn try_to_fix(valid_urls: Vec<ReturnURL>, matches: Cli) {
                 _ => None,
             };
         }
-    }
 }
 
 pub fn main_interface(mut matches: Cli) {
@@ -262,7 +261,7 @@ pub fn main_interface(mut matches: Cli) {
                     com.get_documentation()
                         .unwrap_or("<error - couldn't get mode description>")
                 ),
-                false => println!("[{}] {}", selector, name,),
+                false => println!("[{selector}] {name}",),
             }
         }
 
@@ -271,12 +270,9 @@ pub fn main_interface(mut matches: Cli) {
 
         match Commands::from_selector(mode) {
             Some(mut sub) => {
-                match sub.fill_out_values() {
-                    Err(e) => {
-                        error!("{}", e);
-                        continue;
-                    }
-                    _ => (),
+                if let Err(e) = sub.fill_out_values() {
+                    error!("{e}");
+                    continue;
                 }
                 let valid_urls = match sub.execute(matches.clone()) {
                     Ok(u) => match u {
@@ -284,7 +280,7 @@ pub fn main_interface(mut matches: Cli) {
                         None => Vec::new(),
                     },
                     Err(e) => {
-                        error!("{}", e);
+                        error!("{e}");
                         continue;
                     }
                 };

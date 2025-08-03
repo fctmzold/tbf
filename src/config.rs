@@ -10,7 +10,7 @@ pub enum ProcessingType {
     Bruteforce,
 }
 
-#[derive(Parser, Clone, Debug)]
+#[derive(Parser, Clone, Debug, Default)]
 #[clap(author, version, about, long_about = None)]
 pub struct Cli {
     /// Provide minimal output
@@ -37,18 +37,6 @@ pub struct Cli {
     pub command: Option<Commands>,
 }
 
-impl Default for Cli {
-    fn default() -> Self {
-        Cli {
-            simple: false,
-            verbose: false,
-            cdnfile: None,
-            progressbar: false,
-            mode: None,
-            command: None,
-        }
-    }
-}
 
 #[derive(Subcommand, Clone, Debug, EnumMessage, EnumIter, Display, VariantNames, EnumString)]
 pub enum Commands {
@@ -129,10 +117,7 @@ pub enum Commands {
 
 impl Commands {
     pub fn show_description(&self) -> bool {
-        match self {
-            Self::Update => false,
-            _ => true,
-        }
+        !matches!(self, Self::Update)
     }
 
     pub fn to_short_desc(&self) -> String {
@@ -161,10 +146,7 @@ impl Commands {
                 if s > 0 {
                     let s = s - 1;
                     match Self::VARIANTS.get(s) {
-                        Some(a) => match Self::from_str(a) {
-                            Ok(e) => Some(e),
-                            Err(_) => None,
-                        },
+                        Some(a) => Self::from_str(a).ok(),
                         None => None,
                     }
                 } else {

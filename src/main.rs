@@ -36,27 +36,27 @@ fn main() {
 
     env_logger::Builder::from_env(Env::default().filter_or(
         env_logger::DEFAULT_FILTER_ENV,
-        format!("{},html5ever=info,selectors=info", log_level),
+        format!("{log_level},html5ever=info,selectors=info"),
     ))
     .format_timestamp_millis()
     .init();
 
     // making panics look nicer
     panic::set_hook(Box::new(move |panic_info| {
-        debug!("{}", panic_info);
+        debug!("{panic_info}");
         if let Some(s) = panic_info.payload().downcast_ref::<&str>() {
-            error!("{}", s);
+            error!("{s}");
         } else if let Some(s) = panic_info.payload().downcast_ref::<String>() {
-            error!("{}", s);
+            error!("{s}");
         } else {
-            error!("{}", panic_info);
+            error!("{panic_info}");
         }
     }));
 
     match matches.command {
         Some(ref sub) => match sub.execute(matches.clone()) {
             Ok(_) => {}
-            Err(e) => error!("{}", e),
+            Err(e) => error!("{e}"),
         },
         None => main_interface(matches),
     }

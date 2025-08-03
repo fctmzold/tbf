@@ -22,28 +22,13 @@ pub fn check_availability(
     for cdn in cdn_urls_compiled {
         urls.push(AvailabilityCheck {
             fragment: (format!(
-                "https://{cdn}/{hash}_{username}_{broadcast_id}_{timestamp}/chunked/1.ts",
-                cdn = cdn,
-                hash = hash,
-                username = username,
-                broadcast_id = broadcast_id,
-                timestamp = timestamp
+                "https://{cdn}/{hash}_{username}_{broadcast_id}_{timestamp}/chunked/1.ts"
             )),
             fragment_muted: (format!(
-                "https://{cdn}/{hash}_{username}_{broadcast_id}_{timestamp}/chunked/1-muted.ts",
-                cdn = cdn,
-                hash = hash,
-                username = username,
-                broadcast_id = broadcast_id,
-                timestamp = timestamp
+                "https://{cdn}/{hash}_{username}_{broadcast_id}_{timestamp}/chunked/1-muted.ts"
             )),
             playlist: (format!(
-                "https://{cdn}/{hash}_{username}_{broadcast_id}_{timestamp}/chunked/index-dvr.m3u8",
-                cdn = cdn,
-                hash = hash,
-                username = username,
-                broadcast_id = broadcast_id,
-                timestamp = timestamp
+                "https://{cdn}/{hash}_{username}_{broadcast_id}_{timestamp}/chunked/index-dvr.m3u8"
             )),
         });
     }

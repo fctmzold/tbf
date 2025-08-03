@@ -8,7 +8,7 @@ use std::{collections::HashMap, str::FromStr};
 use url::Url;
 
 use crate::config::Cli;
-use crate::error::ClipError;
+use crate::error::Clip;
 use crate::twitch::models::{ClipQuery, ClipResponse, ClipVars, ReturnURL};
 use crate::util::info;
 
@@ -20,40 +20,40 @@ fn extract_slug(s: String) -> Result<Option<String>> {
                     let segments = match resolved_url
                         .path_segments()
                         .map(|c| c.collect::<Vec<_>>())
-                        .ok_or(ClipError::SegmentMapError)
+                        .ok_or(Clip::SegmentMap)
                     {
                         Ok(s) => s,
                         Err(e) => return Err(e)?,
                     };
                     if segments.len() > 1 {
                         if segments[1] == "clip" {
-                            return Ok(Some(segments[2].to_string()));
+                            Ok(Some(segments[2].to_string()))
                         } else {
-                            return Err(ClipError::WrongURLError("Not a clip URL".to_string()))?;
-                        };
+                            Err(Clip::WrongURL("Not a clip URL".to_string()))?
+                        }
                     } else {
-                        return Err(ClipError::WrongURLError("Not a clip URL".to_string()))?;
+                        Err(Clip::WrongURL("Not a clip URL".to_string()))?
                     }
                 }
                 "clips.twitch.tv" => {
                     let segments = match resolved_url
                         .path_segments()
                         .map(|c| c.collect::<Vec<_>>())
-                        .ok_or(ClipError::SegmentMapError)
+                        .ok_or(Clip::SegmentMap)
                     {
                         Ok(s) => s,
                         Err(e) => return Err(e)?,
                     };
-                    return Ok(Some(segments[0].to_string()));
+                    Ok(Some(segments[0].to_string()))
                 }
                 _ => {
-                    return Err(ClipError::WrongURLError(
+                    Err(Clip::WrongURL(
                         "Only twitch.tv URLs are supported".to_string(),
                     ))?
                 }
             },
             None => {
-                return Err(ClipError::WrongURLError(
+                Err(Clip::WrongURL(
                     "Only twitch.tv URLs are supported".to_string(),
                 ))?
             }
@@ -107,7 +107,7 @@ pub fn find_bid_from_clip(s: String, flags: Cli) -> Result<Option<(String, i64)>
         Ok(d) => d,
         Err(e) => {
             if !flags.simple {
-                error!("Couldn't get the info from the clip: {}", e);
+                error!("Couldn't get the info from the clip: {e}");
             }
             return Ok(None);
         }
@@ -136,14 +136,14 @@ pub fn clip_bruteforce(
 
     let res: Vec<ReturnURL> = if flags.progressbar {
         iter_pb.filter_map( |number| {
-            let url = format!("https://clips-media-assets2.twitch.tv/AT-cm%7C{}-offset-{}-360.mp4", vod, number);
+            let url = format!("https://clips-media-assets2.twitch.tv/AT-cm%7C{vod}-offset-{number}-360.mp4");
             let res = match crate::HTTP_CLIENT.get(url.as_str()).send() {
                 Ok(r) => r,
                 Err(_) => return None
             };
             if res.status() == 200 {
                 if flags.verbose {
-                    cloned_pb.println(format!("Got a clip! - {}", url));
+                    cloned_pb.println(format!("Got a clip! - {url}"));
                 }
                 Some(ReturnURL {
                     url,
@@ -151,7 +151,7 @@ pub fn clip_bruteforce(
                 })
             } else if res.status() == 403 {
                 if flags.verbose {
-                    cloned_pb.println(format!("Still going! - {}", url));
+                    cloned_pb.println(format!("Still going! - {url}"));
                 }
                 None
             } else {
@@ -161,14 +161,14 @@ pub fn clip_bruteforce(
         }).collect()
     } else {
         iter.filter_map( |number| {
-            let url = format!("https://clips-media-assets2.twitch.tv/AT-cm%7C{}-offset-{}-360.mp4", vod, number);
+            let url = format!("https://clips-media-assets2.twitch.tv/AT-cm%7C{vod}-offset-{number}-360.mp4");
             let res = match crate::HTTP_CLIENT.get(url.as_str()).send() {
                 Ok(r) => r,
                 Err(_) => return None
             };
             if res.status() == 200 {
                 if flags.verbose {
-                    cloned_pb.println(format!("Got a clip! - {}", url));
+                    cloned_pb.println(format!("Got a clip! - {url}"));
                 }
                 Some(ReturnURL {
                     url,
@@ -176,7 +176,7 @@ pub fn clip_bruteforce(
                 })
             } else if res.status() == 403 {
                 if flags.verbose {
-                    cloned_pb.println(format!("Still going! - {}", url));
+                    cloned_pb.println(format!("Still going! - {url}"));
                 }
                 None
             } else {
@@ -193,10 +193,8 @@ pub fn clip_bruteforce(
         for line in res.clone() {
             info(line.url, flags.simple);
         }
-    } else {
-        if !flags.simple {
-            info!("{}", "Couldn't find anything :(".red());
-        }
+    } else if !flags.simple {
+        info!("{}", "Couldn't find anything :(".red());
     }
     Ok(Some(res))
 }

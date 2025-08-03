@@ -15,7 +15,7 @@ use time::{
 use url::Url;
 
 use super::config::{Cli, ProcessingType, CURL_UA};
-use crate::error::DeriveDateError;
+use crate::error::DeriveDate;
 use crate::twitch::models::CDN_URLS;
 
 lazy_static! {
@@ -50,9 +50,9 @@ pub struct ExtractedTimestamps {
 
 pub fn info(text: String, simple: bool) {
     if simple {
-        println!("{}", text);
+        println!("{text}");
     } else {
-        info!("{}", text);
+        info!("{text}");
     }
 }
 
@@ -93,7 +93,7 @@ pub fn get_random_useragent() -> String {
 
 fn process_url(url: &str) -> Result<Html> {
     let ua = get_random_useragent();
-    debug!("Using UA - {}", ua);
+    debug!("Using UA - {ua}");
     let init_resp = match crate::HTTP_CLIENT.get(url).header(USER_AGENT, ua).send() {
         Ok(r) => r,
         Err(e) => return Err(e)?,
@@ -119,7 +119,7 @@ pub fn derive_date_from_url(url: &str, flags: Cli) -> Result<(ProcessingType, UR
                     let segments = match resolved_url
                         .path_segments()
                         .map(|c| c.collect::<Vec<_>>())
-                        .ok_or(DeriveDateError::SegmentMapError)
+                        .ok_or(DeriveDate::SegmentMap)
                     {
                         Ok(s) => s,
                         Err(e) => return Err(e)?,
@@ -135,13 +135,12 @@ pub fn derive_date_from_url(url: &str, flags: Cli) -> Result<(ProcessingType, UR
                             let selector =
                                 match Selector::parse(".stream-timestamp-dt.to-dowdatetime") {
                                     Ok(s) => s,
-                                    Err(_) => return Err(DeriveDateError::SelectorError)?,
+                                    Err(_) => return Err(DeriveDate::Selector)?,
                                 };
 
                             let date = match fragment
-                                .select(&selector)
-                                .nth(0)
-                                .ok_or(DeriveDateError::ScraperElementError)
+                                .select(&selector).next()
+                                .ok_or(DeriveDate::ScraperElement)
                             {
                                 Ok(d) => d.text().collect::<String>(),
                                 Err(e) => return Err(e)?,
@@ -157,21 +156,21 @@ pub fn derive_date_from_url(url: &str, flags: Cli) -> Result<(ProcessingType, UR
                                 },
                             ));
                         } else {
-                            return Err(DeriveDateError::WrongURLError(
+                            Err(DeriveDate::WrongURL(
                                 "Not a valid TwitchTracker VOD URL".to_string(),
-                            ))?;
-                        };
+                            ))?
+                        }
                     } else {
-                        return Err(DeriveDateError::WrongURLError(
+                        Err(DeriveDate::WrongURL(
                             "Not a valid TwitchTracker VOD URL".to_string(),
-                        ))?;
-                    };
+                        ))?
+                    }
                 }
                 "streamscharts.com" | "www.streamscharts.com" => {
                     let segments = match resolved_url
                         .path_segments()
                         .map(|c| c.collect::<Vec<_>>())
-                        .ok_or(DeriveDateError::SegmentMapError)
+                        .ok_or(DeriveDate::SegmentMap)
                     {
                         Ok(s) => s,
                         Err(e) => return Err(e)?,
@@ -232,30 +231,31 @@ pub fn derive_date_from_url(url: &str, flags: Cli) -> Result<(ProcessingType, UR
                                 },
                             ));
                         } else {
-                            return Err(DeriveDateError::WrongURLError(
+                            Err(DeriveDate::WrongURL(
                                 "Not a valid StreamsCharts VOD URL".to_string(),
-                            ))?;
-                        };
-                    } else {
-                        return Err(DeriveDateError::WrongURLError(
+                            ))?
+                        }
+                    }
+                     else {
+                        Err(DeriveDate::WrongURL(
                             "Not a valid StreamsCharts VOD URL".to_string(),
-                        ))?;
-                    };
+                        ))?
+                    }
                 }
                 _ => {
-                    return Err(DeriveDateError::WrongURLError(
+                    Err(DeriveDate::WrongURL(
                         "Only twitchtracker.com and streamscharts.com URLs are supported"
                             .to_string(),
                     ))?
                 }
             },
             None => {
-                return Err(DeriveDateError::WrongURLError(
+                Err(DeriveDate::WrongURL(
                     "Only twitchtracker.com and streamscharts.com URLs are supported".to_string(),
                 ))?
             }
         },
-        Err(e) => return Err(e)?,
+        Err(e) => Err(e)?,
     }
 }
 
@@ -269,25 +269,23 @@ pub fn parse_timestamp(timestamp: &str) -> Result<i64> {
             Ok(i) => Ok(i),
             Err(e) => Err(e)?,
         }
+    } else if RE_UTC.is_match(timestamp) {
+        match PrimitiveDateTime::parse(timestamp, format_with_utc) {
+            Ok(d) => Ok(d.assume_utc().unix_timestamp()),
+            Err(e) => Err(e)?,
+        }
     } else {
-        if RE_UTC.is_match(timestamp) {
-            match PrimitiveDateTime::parse(timestamp, format_with_utc) {
-                Ok(d) => Ok(d.assume_utc().unix_timestamp()),
-                Err(e) => Err(e)?,
-            }
-        } else {
-            let parsed_rfc = PrimitiveDateTime::parse(timestamp, &Rfc3339);
-            match parsed_rfc {
-                Ok(result) => Ok(result.assume_utc().unix_timestamp()),
-                Err(_) => {
-                    let parsed_wo_utc = PrimitiveDateTime::parse(timestamp, format_wo_utc);
-                    match parsed_wo_utc {
+        let parsed_rfc = PrimitiveDateTime::parse(timestamp, &Rfc3339);
+        match parsed_rfc {
+            Ok(result) => Ok(result.assume_utc().unix_timestamp()),
+            Err(_) => {
+                let parsed_wo_utc = PrimitiveDateTime::parse(timestamp, format_wo_utc);
+                match parsed_wo_utc {
+                    Ok(result) => Ok(result.assume_utc().unix_timestamp()),
+                    Err(_) => match PrimitiveDateTime::parse(timestamp, format_wo_sec) {
                         Ok(result) => Ok(result.assume_utc().unix_timestamp()),
-                        Err(_) => match PrimitiveDateTime::parse(timestamp, format_wo_sec) {
-                            Ok(result) => Ok(result.assume_utc().unix_timestamp()),
-                            Err(e) => Err(e)?,
-                        },
-                    }
+                        Err(e) => Err(e)?,
+                    },
                 }
             }
         }
@@ -314,7 +312,7 @@ pub fn compile_cdn_list(cdn_file_path: Option<String>) -> Vec<String> {
                     file_extension = Path::new(&actual_path).extension();
                 }
                 Err(e) => {
-                    info!("Couldn't open the CDN config file - {:#?}", e);
+                    info!("Couldn't open the CDN config file - {e:#?}");
                 }
             }
         }
@@ -322,73 +320,70 @@ pub fn compile_cdn_list(cdn_file_path: Option<String>) -> Vec<String> {
     }
 
     match file_extension {
-        Some(ext) => match cdn_file {
-            Some(mut f) => {
-                let mut cdn_string = String::new();
+        Some(ext) => if let Some(mut f) = cdn_file {
+            let mut cdn_string = String::new();
 
-                f.read_to_string(&mut cdn_string).unwrap();
+            f.read_to_string(&mut cdn_string).unwrap();
 
-                match ext.to_str().unwrap() {
-                    "json" => {
-                        let json_init: Result<CDNFile, serde_json::Error> =
-                            serde_json::from_str(cdn_string.as_str());
-                        match json_init {
-                            Ok(j) => {
-                                return_vec.extend(j.cdns);
+            match ext.to_str().unwrap() {
+                "json" => {
+                    let json_init: Result<CDNFile, serde_json::Error> =
+                        serde_json::from_str(cdn_string.as_str());
+                    match json_init {
+                        Ok(j) => {
+                            return_vec.extend(j.cdns);
 
-                                return_vec.sort_unstable();
-                                return_vec.dedup();
-                            }
-                            Err(e) => {
-                                info!("Couldn't parse the CDN list file: invalid JSON - {:#?}", e);
-                            }
+                            return_vec.sort_unstable();
+                            return_vec.dedup();
                         }
-                    }
-                    "toml" => {
-                        let toml_init: Result<CDNFile, toml::de::Error> =
-                            toml::from_str(cdn_string.as_str());
-                        match toml_init {
-                            Ok(t) => {
-                                return_vec.extend(t.cdns);
-
-                                return_vec.sort_unstable();
-                                return_vec.dedup();
-                            }
-                            Err(e) => {
-                                info!("Couldn't parse the CDN list file: invalid TOML - {:#?}", e);
-                            }
+                        Err(e) => {
+                            info!("Couldn't parse the CDN list file: invalid JSON - {e:#?}");
                         }
-                    }
-                    "yaml" | "yml" => {
-                        let yaml_init: Result<CDNFile, serde_yaml::Error> =
-                            serde_yaml::from_str(cdn_string.as_str());
-                        match yaml_init {
-                            Ok(y) => {
-                                return_vec.extend(y.cdns);
-
-                                return_vec.sort_unstable();
-                                return_vec.dedup();
-                            }
-                            Err(e) => {
-                                info!("Couldn't parse the CDN list file: invalid YAML - {:#?}", e);
-                            }
-                        }
-                    }
-                    "txt" => {
-                        let mut cdn_string_split: Vec<String> =
-                            cdn_string.lines().map(|l| l.to_string()).collect();
-
-                        return_vec.append(&mut cdn_string_split);
-
-                        return_vec.sort_unstable();
-                        return_vec.dedup();
-                    }
-                    _ => {
-                        info!("Couldn't parse the CDN list file: it must either be a text file, a JSON file, a TOML file or a YAML file.");
                     }
                 }
+                "toml" => {
+                    let toml_init: Result<CDNFile, toml::de::Error> =
+                        toml::from_str(cdn_string.as_str());
+                    match toml_init {
+                        Ok(t) => {
+                            return_vec.extend(t.cdns);
+
+                            return_vec.sort_unstable();
+                            return_vec.dedup();
+                        }
+                        Err(e) => {
+                            info!("Couldn't parse the CDN list file: invalid TOML - {e:#?}");
+                        }
+                    }
+                }
+                "yaml" | "yml" => {
+                    let yaml_init: Result<CDNFile, serde_yaml::Error> =
+                        serde_yaml::from_str(cdn_string.as_str());
+                    match yaml_init {
+                        Ok(y) => {
+                            return_vec.extend(y.cdns);
+
+                            return_vec.sort_unstable();
+                            return_vec.dedup();
+                        }
+                        Err(e) => {
+                            info!("Couldn't parse the CDN list file: invalid YAML - {e:#?}");
+                        }
+                    }
+                }
+                "txt" => {
+                    let mut cdn_string_split: Vec<String> =
+                        cdn_string.lines().map(|l| l.to_string()).collect();
+
+                    return_vec.append(&mut cdn_string_split);
+
+                    return_vec.sort_unstable();
+                    return_vec.dedup();
+                }
+                _ => {
+                    info!("Couldn't parse the CDN list file: it must either be a text file, a JSON file, a TOML file or a YAML file.");
+                }
             }
-            None => {}
         },
         None => match cdn_file {
             Some(mut f) => {
@@ -431,19 +426,18 @@ pub fn compile_cdn_list(cdn_file_path: Option<String>) -> Vec<String> {
 fn sc_extract_exact_timestamps(html_fragment: &Html) -> Result<ExtractedTimestamps> {
     let exact_dt_selector = match Selector::parse("div > div[data-requests]") {
         Ok(s) => s,
-        Err(_) => Err(DeriveDateError::SelectorError)?,
+        Err(_) => Err(DeriveDate::Selector)?,
     };
 
     match html_fragment
-        .select(&exact_dt_selector)
-        .nth(0)
-        .ok_or(DeriveDateError::ScraperElementError)
+        .select(&exact_dt_selector).next()
+        .ok_or(DeriveDate::ScraperElement)
     {
         Ok(d) => {
             match d
                 .value()
                 .attr("data-requests")
-                .ok_or(DeriveDateError::ScraperAttributeError)
+                .ok_or(DeriveDate::ScraperAttribute)
             {
                 Ok(s) => {
                     // Parse the clips_json into the struct StreamsChartsTwitchClip with serde_json
@@ -459,50 +453,49 @@ fn sc_extract_exact_timestamps(html_fragment: &Html) -> Result<ExtractedTimestam
                         Err(e) => return Err(e)?,
                     };
 
-                    return Ok(ExtractedTimestamps {
+                    Ok(ExtractedTimestamps {
                         processing_type: ProcessingType::Exact,
                         start_timestamp: start_dt,
                         end_timestamp: end_dt,
-                    });
+                    })
                 }
-                Err(e) => return Err(e)?,
+                Err(e) => Err(e)?,
             }
         }
-        Err(e) => return Err(e)?,
-    };
+        Err(e) => Err(e)?,
+    }
 }
 
 fn sc_bruteforce_timestamps(html_fragment: &Html) -> Result<ExtractedTimestamps> {
     let bruteforce_selector = match Selector::parse("time") {
         Ok(s) => s,
-        Err(_) => Err(DeriveDateError::SelectorError)?,
+        Err(_) => Err(DeriveDate::Selector)?,
     };
     let date_init = match html_fragment
-        .select(&bruteforce_selector)
-        .nth(0)
-        .ok_or(DeriveDateError::ScraperElementError)
+        .select(&bruteforce_selector).next()
+        .ok_or(DeriveDate::ScraperElement)
     {
         Ok(d) => {
             match d
                 .value()
                 .attr("datetime")
-                .ok_or(DeriveDateError::ScraperAttributeError)
+                .ok_or(DeriveDate::ScraperAttribute)
             {
                 Ok(s) => s,
                 Err(e) => return Err(e)?,
             }
         }
-        Err(e) => return Err(e)?,
+        Err(e) => Err(e)?,
     };
     let date_parsed = match parse_timestamp(date_init) {
         Ok(d) => d,
         Err(e) => return Err(e)?,
     };
-    return Ok(ExtractedTimestamps {
+    Ok(ExtractedTimestamps {
         processing_type: ProcessingType::Bruteforce,
         start_timestamp: date_parsed - 60,
         end_timestamp: date_parsed + 60,
-    });
+    })
 }
 
 #[cfg(test)]
@@ -590,8 +583,8 @@ mod tests {
             "testing unsupported extension (should be unequal)"
         );
 
-        let mut cdn_urls_string_init: Vec<String> =
-            CDN_URLS.iter().map(|s| s.to_string()).collect();
+        let mut cdn_urls_string_init:
+            Vec<String> = CDN_URLS.iter().map(|s| s.to_string()).collect();
         cdn_urls_string_init.sort();
 
         assert_eq!(

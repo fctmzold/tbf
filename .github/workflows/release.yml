@@ -17,11 +17,9 @@ jobs:
     create-release:
         runs-on: ubuntu-latest
         steps:
-            # --- START: THIS IS THE FIX ---
             # The repository must be checked out so that gh can generate release notes from the git history.
             - name: Checkout repository
               uses: actions/checkout@v4
-            # --- END: THIS IS THE FIX ---
 
             - name: Create Draft Release with Auto-Generated Notes
               env:
@@ -89,6 +87,9 @@ jobs:
         runs-on: ubuntu-latest
         needs: [create-release, upload-assets]
         steps:
+            - name: Checkout repository
+              uses: actions/checkout@v4
+
             - name: Publish Release
               env:
                   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

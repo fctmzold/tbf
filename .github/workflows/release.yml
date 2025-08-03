@@ -4,17 +4,22 @@ permissions:
     contents: write
 
 on:
+    # 1. Automatic trigger: Runs when a tag like v1.2.3 is pushed
     push:
         tags:
             - "v[0-9]+.*"
 
+    # 2. Manual trigger: Allows running this workflow from the Actions tab
     workflow_dispatch:
 
 jobs:
+    # Job to create a DRAFT release. This prevents a published release
+    # from appearing before all assets are built and uploaded.
     create-release:
         runs-on: ubuntu-latest
         steps:
             - name: Create Draft Release
+              id: create_release
               uses: taiki-e/create-gh-release-action@v1
               with:
                   # (Optional) Create a release from the main branch
@@ -50,6 +55,12 @@ jobs:
             - name: Checkout repository
               uses: actions/checkout@v4
 
+            # Install the MinGW toolchain, which is required for the windows-gnu target.
+            # This step only runs on the Windows runner.
+            - name: Install MinGW for Windows GNU target
+              if: runner.os == 'Windows'
+              run: choco install mingw --no-progress
+
             - name: Install Rust toolchain
               uses: dtolnay/rust-toolchain@stable
               with:
@@ -66,6 +77,8 @@ jobs:
                       ~/.cargo/git/db/
                       target/
                   key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+                  restore-keys: |
+                      ${{ runner.os }}-cargo-${{ matrix.target }}-
 
             - name: Build and upload Rust binary
               uses: taiki-e/upload-rust-binary-action@v1
@@ -79,6 +92,7 @@ jobs:
                   # Use a consistent archive name format
                   archive: $bin-$tag-$target
               env:
+                  # (required) GitHub token for uploading assets
                   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     # This job runs ONLY after all 'upload-assets' jobs have succeeded.

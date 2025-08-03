@@ -1,110 +1,158 @@
-# tbf
-Finds VOD playlists on Twitch.
 
-![Showcase](showcase.gif)
+# 🎯 tbf – Twitch Broadcast Finder 
 
-## How to install
+> A powerful command-line tool to effortlessly find and manage Twitch VOD playlists and clips. 
 
-```cargo install --git https://github.com/vyneer/tbf```
+![Showcase](https://raw.githubusercontent.com/vyneer/tbf/master/showcase.gif) 
 
-or download the latest binary from the [Releases](https://github.com/vyneer/tbf/releases) page
+[![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/vyneer/tbf) 
+[![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) 
+[![GitHub release](https://img.shields.io/github/v/release/vyneer/tbf)](https://github.com/vyneer/tbf/releases) 
 
-## Subcommands
+--- 
 
-### None
+## 📖 Table of Contents 
 
-```tbf```
+* [About](#-about-the-project) 
+* [Installation](#-installation) 
+* [Usage](#-usage) 
+* [Features](#-features) 
+* [Project Structure](#-project-structure) 
+* [Contributing](#-contributing) 
+* [License](#-license) 
+* [Contact](#-contact) 
 
-Will ask you what mode you want and proceed from there.
+--- 
 
-### exact
+## 🌟 About The Project 
 
-```tbf exact [FLAGS] <username> <id> <stamp>```
+`tbf` is a command-line interface (CLI) tool designed to simplify the process of finding and working with Twitch VODs (Video on Demand) and clips. Whether you need to generate a direct `m3u8` playlist URL, search for a VOD within a specific timeframe, or extract clips, `tbf` provides a set of powerful and easy-to-use commands to get the job done. 
 
-```tbf exact destiny 39700667438 1605781794```
+This tool is perfect for researchers, archivists, and anyone who needs programmatic access to Twitch's video content. 
 
-Combine all the parts (streamer's username, VOD/broadcast ID and a timestamp) into a proper m3u8 URL and check whether the VOD is available.
+--- 
 
-### bruteforce
+## 🚀 Installation 
 
-```tbf bruteforce [FLAGS] <username> <id> <from> <to>```
+You can install `tbf` in one of two ways: 
 
-```tbf bruteforce destiny 39700667438 1605781694 1605781894```
+### From Source 
 
-Go over a range of timestamps, looking for a usable/working m3u8 URL, and check whether the VOD is available.
+If you have Rust and Cargo installed, you can build and install `tbf` directly from the source: 
+```bash 
+cargo install --git https://github.com/vyneer/tbf 
+``` 
 
-### clipforce
+### From Releases 
 
-```tbf clipforce [FLAGS] <id> <start> <end>```
+Alternatively, you can download a pre-compiled binary for your operating system from the [Releases Page](https://github.com/vyneer/tbf/releases). 
 
-```tbf clipforce 39700667438 0 3600```
+--- 
 
-Go over a range of timestamps, looking for clips in a VOD.
+## 🛠️ Usage 
 
-### link
+`tbf` offers several subcommands to perform different actions. Here are some of the most common use cases: 
 
-```tbf link [FLAGS] <url>```
+### Interactive Mode 
 
-```tbf link https://twitchtracker.com/destiny/streams/41402441870```
+If you're not sure where to start, you can run `tbf` without any arguments to enter an interactive mode that will guide you through the available options. 
+```bash 
+tbf 
+``` 
 
-Get the m3u8 from a TwitchTracker/StreamsCharts URL.
+### `exact` 
 
-### live
+Generate and verify a direct `m3u8` URL for a VOD with a known timestamp. 
+```bash 
+tbf exact [FLAGS] <username> <id> <timestamp> 
+``` 
+**Example:** 
+```bash 
+tbf exact destiny 39700667438 1605781794 
+``` 
 
-```tbf link [FLAGS] <username>```
+### `bruteforce` 
 
-```tbf live forsen```
+Search for a VOD within a given range of timestamps. This is useful when you don't know the exact timestamp of the broadcast. 
+```bash 
+tbf bruteforce [FLAGS] <username> <id> <from> <to> 
+``` 
+**Example:** 
+```bash 
+tbf bruteforce destiny 39700667438 1605781694 1605781894 
+``` 
 
-Get the m3u8 from a currently running stream.
+### `clipforce` 
 
-### clip
+Scan a VOD to discover all available clips within a specified time range. 
+```bash 
+tbf clipforce [FLAGS] <id> <start> <end> 
+``` 
+**Example:** 
+```bash 
+tbf clipforce 39700667438 0 3600 
+``` 
 
-```tbf clip [FLAGS] <clip>```
+--- 
 
-```tbf clip SpotlessCrypticStapleAMPTropPunch-H_rVu0mGfGLNMlEx```
+## ✨ Features 
 
-Get the m3u8 from a clip using TwitchTracker.
+*   **Interactive Mode**: A user-friendly interface to guide you through the process. 
+*   **Direct URL Generation**: Quickly get a direct `.m3u8` VOD URL. 
+*   **Timestamp Bruteforcing**: Find VODs even without knowing the exact start time. 
+*   **Clip Discovery**: Easily find and extract clips from a VOD. 
+*   **Multiple Sources**: Supports fetching data from TwitchTracker and StreamsCharts. 
 
-### fix
+--- 
 
-```tbf fix [FLAGS] <url>```
+## 📂 Project Structure 
 
-```tbf clip https://vod-secure.twitch.tv/c03c3d945ff2b23bcbc3_pezz_40932307915_1656699046/chunked/index-dvr.m3u8```
+The project is organized into several modules to ensure a clean and maintainable codebase: 
 
-Download and convert an unplayable unmuted Twitch VOD playlist into a playable muted one.
+``` 
+tbf/ 
+├── Cargo.toml # Project metadata and dependencies 
+├── README.md # Project overview and usage 
+└── src/ 
+    ├── main.rs # Entry point 
+    ├── config.rs # Configuration handling 
+    ├── error.rs # Custom error definitions 
+    ├── interface.rs # CLI interface logic 
+    ├── twitch.rs # Twitch module entry point 
+    ├── update.rs # Update-related utilities 
+    ├── util.rs # General utility functions 
+    └── twitch/ 
+        ├── clips.rs # Clip-related logic 
+        ├── models.rs # Twitch API data models 
+        └── vods.rs # VOD handling and playlist logic 
+``` 
 
-#### Flags
+--- 
 
-##### -o, --output
+## 🤝 Contributing 
 
-Set the output path (default is current folder).
+Contributions are what make the open-source community such an amazing place to learn, inspire, and create. Any contributions you make are **greatly appreciated**. 
 
-##### -s, --slow
+If you have a suggestion that would make this better, please fork the repo and create a pull request. You can also simply open an issue with the tag "enhancement". 
 
-Use the old (slow, but more reliable) method of checking for segments.
+1.  Fork the Project 
+2.  Create your Feature Branch (`git checkout -b feature/AmazingFeature`) 
+3.  Commit your Changes (`git commit -m 'Add some AmazingFeature'`) 
+4.  Push to the Branch (`git push origin feature/AmazingFeature`) 
+5.  Open a Pull Request 
 
-## Flags
+Don't forget to give the project a star! Thanks again! 
 
-### -c, --cdnfile 
+--- 
 
-Import more CDN urls via a config file (TXT/JSON/YAML/TOML).
+## 📄 License 
 
-### -h, --help
+Distributed under the MIT License. See `LICENSE` for more information. 
 
-Print help information.
+--- 
 
-### -s, --simple
+## 📞 Contact 
 
-Provide minimal output.
+Vyneer - [@vyneer](https://twitter.com/vyneer) 
 
-### -v, --verbose
-
-Show more info.
-
-### -m, --mode
-
-Select the preferred processing mode for StreamsCharts [possible values: exact, bruteforce].
-
-### -p, --progressbar
-
-Enable a progress bar (which *might* slow stuff down according to [this](https://github.com/mitsuhiko/indicatif/issues/170))
+Project Link: [https://github.com/vyneer/tbf](https://github.com/vyneer/tbf)

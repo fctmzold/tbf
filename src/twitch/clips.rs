@@ -136,11 +136,15 @@ pub fn clip_bruteforce(
 
     let res: Vec<ReturnURL> = if flags.progressbar {
         iter_pb.filter_map( |number| {
-            let url = format!("https://clips-media-assets2.twitch.tv/AT-cm%7C{vod}-offset-{number}-360.mp4");
+            let url = format!("https://clips-media-assets2.twitch.tv/{vod}-offset-{number}.mp4");
             let res = match crate::HTTP_CLIENT.get(url.as_str()).send() {
                 Ok(r) => r,
-                Err(_) => return None
+                Err(e) => {
+                    cloned_pb.println(format!("Error sending request for {}: {}", url, e));
+                    return None
+                }
             };
+            cloned_pb.println(format!("Checking URL: {} - Status: {}", url, res.status()));
             if res.status() == 200 {
                 if flags.verbose {
                     cloned_pb.println(format!("Got a clip! - {url}"));
@@ -161,11 +165,15 @@ pub fn clip_bruteforce(
         }).collect()
     } else {
         iter.filter_map( |number| {
-            let url = format!("https://clips-media-assets2.twitch.tv/AT-cm%7C{vod}-offset-{number}-360.mp4");
+            let url = format!("https://clips-media-assets2.twitch.tv/{vod}-offset-{number}.mp4");
             let res = match crate::HTTP_CLIENT.get(url.as_str()).send() {
                 Ok(r) => r,
-                Err(_) => return None
+                Err(e) => {
+                    cloned_pb.println(format!("Error sending request for {}: {}", url, e));
+                    return None
+                }
             };
+            cloned_pb.println(format!("Checking URL: {} - Status: {}", url, res.status()));
             if res.status() == 200 {
                 if flags.verbose {
                     cloned_pb.println(format!("Got a clip! - {url}"));

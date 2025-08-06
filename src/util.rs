@@ -139,7 +139,8 @@ pub fn derive_date_from_url(url: &str, flags: Cli) -> Result<(ProcessingType, UR
                                 };
 
                             let date = match fragment
-                                .select(&selector).next()
+                                .select(&selector)
+                                .next()
                                 .ok_or(DeriveDate::ScraperElement)
                             {
                                 Ok(d) => d.text().collect::<String>(),
@@ -235,25 +236,19 @@ pub fn derive_date_from_url(url: &str, flags: Cli) -> Result<(ProcessingType, UR
                                 "Not a valid StreamsCharts VOD URL".to_string(),
                             ))?
                         }
-                    }
-                     else {
+                    } else {
                         Err(DeriveDate::WrongURL(
                             "Not a valid StreamsCharts VOD URL".to_string(),
                         ))?
                     }
                 }
-                _ => {
-                    Err(DeriveDate::WrongURL(
-                        "Only twitchtracker.com and streamscharts.com URLs are supported"
-                            .to_string(),
-                    ))?
-                }
-            },
-            None => {
-                Err(DeriveDate::WrongURL(
+                _ => Err(DeriveDate::WrongURL(
                     "Only twitchtracker.com and streamscharts.com URLs are supported".to_string(),
-                ))?
-            }
+                ))?,
+            },
+            None => Err(DeriveDate::WrongURL(
+                "Only twitchtracker.com and streamscharts.com URLs are supported".to_string(),
+            ))?,
         },
         Err(e) => Err(e)?,
     }
@@ -320,71 +315,73 @@ pub fn compile_cdn_list(cdn_file_path: Option<String>) -> Vec<String> {
     }
 
     match file_extension {
-        Some(ext) => if let Some(mut f) = cdn_file {
-            let mut cdn_string = String::new();
+        Some(ext) => {
+            if let Some(mut f) = cdn_file {
+                let mut cdn_string = String::new();
 
-            f.read_to_string(&mut cdn_string).unwrap();
+                f.read_to_string(&mut cdn_string).unwrap();
 
-            match ext.to_str().unwrap() {
-                "json" => {
-                    let json_init: Result<CDNFile, serde_json::Error> =
-                        serde_json::from_str(cdn_string.as_str());
-                    match json_init {
-                        Ok(j) => {
-                            return_vec.extend(j.cdns);
+                match ext.to_str().unwrap() {
+                    "json" => {
+                        let json_init: Result<CDNFile, serde_json::Error> =
+                            serde_json::from_str(cdn_string.as_str());
+                        match json_init {
+                            Ok(j) => {
+                                return_vec.extend(j.cdns);
 
-                            return_vec.sort_unstable();
-                            return_vec.dedup();
-                        }
-                        Err(e) => {
-                            info!("Couldn't parse the CDN list file: invalid JSON - {e:#?}");
-                        }
-                    }
-                }
-                "toml" => {
-                    let toml_init: Result<CDNFile, toml::de::Error> =
-                        toml::from_str(cdn_string.as_str());
-                    match toml_init {
-                        Ok(t) => {
-                            return_vec.extend(t.cdns);
-
-                            return_vec.sort_unstable();
-                            return_vec.dedup();
-                        }
-                        Err(e) => {
-                            info!("Couldn't parse the CDN list file: invalid TOML - {e:#?}");
+                                return_vec.sort_unstable();
+                                return_vec.dedup();
+                            }
+                            Err(e) => {
+                                info!("Couldn't parse the CDN list file: invalid JSON - {e:#?}");
+                            }
                         }
                     }
-                }
-                "yaml" | "yml" => {
-                    let yaml_init: Result<CDNFile, serde_yaml::Error> =
-                        serde_yaml::from_str(cdn_string.as_str());
-                    match yaml_init {
-                        Ok(y) => {
-                            return_vec.extend(y.cdns);
+                    "toml" => {
+                        let toml_init: Result<CDNFile, toml::de::Error> =
+                            toml::from_str(cdn_string.as_str());
+                        match toml_init {
+                            Ok(t) => {
+                                return_vec.extend(t.cdns);
 
-                            return_vec.sort_unstable();
-                            return_vec.dedup();
-                        }
-                        Err(e) => {
-                            info!("Couldn't parse the CDN list file: invalid YAML - {e:#?}");
+                                return_vec.sort_unstable();
+                                return_vec.dedup();
+                            }
+                            Err(e) => {
+                                info!("Couldn't parse the CDN list file: invalid TOML - {e:#?}");
+                            }
                         }
                     }
-                }
-                "txt" => {
-                    let mut cdn_string_split: Vec<String> =
-                        cdn_string.lines().map(|l| l.to_string()).collect();
+                    "yaml" | "yml" => {
+                        let yaml_init: Result<CDNFile, serde_yaml::Error> =
+                            serde_yaml::from_str(cdn_string.as_str());
+                        match yaml_init {
+                            Ok(y) => {
+                                return_vec.extend(y.cdns);
 
-                    return_vec.append(&mut cdn_string_split);
+                                return_vec.sort_unstable();
+                                return_vec.dedup();
+                            }
+                            Err(e) => {
+                                info!("Couldn't parse the CDN list file: invalid YAML - {e:#?}");
+                            }
+                        }
+                    }
+                    "txt" => {
+                        let mut cdn_string_split: Vec<String> =
+                            cdn_string.lines().map(|l| l.to_string()).collect();
 
-                    return_vec.sort_unstable();
-                    return_vec.dedup();
-                }
-                _ => {
-                    info!("Couldn't parse the CDN list file: it must either be a text file, a JSON file, a TOML file or a YAML file.");
+                        return_vec.append(&mut cdn_string_split);
+
+                        return_vec.sort_unstable();
+                        return_vec.dedup();
+                    }
+                    _ => {
+                        info!("Couldn't parse the CDN list file: it must either be a text file, a JSON file, a TOML file or a YAML file.");
+                    }
                 }
             }
-        },
+        }
         None => match cdn_file {
             Some(mut f) => {
                 let mut cdn_string = String::new();
@@ -430,7 +427,8 @@ fn sc_extract_exact_timestamps(html_fragment: &Html) -> Result<ExtractedTimestam
     };
 
     match html_fragment
-        .select(&exact_dt_selector).next()
+        .select(&exact_dt_selector)
+        .next()
         .ok_or(DeriveDate::ScraperElement)
     {
         Ok(d) => {
@@ -472,7 +470,8 @@ fn sc_bruteforce_timestamps(html_fragment: &Html) -> Result<ExtractedTimestamps>
         Err(_) => Err(DeriveDate::Selector)?,
     };
     let date_init = match html_fragment
-        .select(&bruteforce_selector).next()
+        .select(&bruteforce_selector)
+        .next()
         .ok_or(DeriveDate::ScraperElement)
     {
         Ok(d) => {
@@ -583,8 +582,8 @@ mod tests {
             "testing unsupported extension (should be unequal)"
         );
 
-        let mut cdn_urls_string_init:
-            Vec<String> = CDN_URLS.iter().map(|s| s.to_string()).collect();
+        let mut cdn_urls_string_init: Vec<String> =
+            CDN_URLS.iter().map(|s| s.to_string()).collect();
         cdn_urls_string_init.sort();
 
         assert_eq!(

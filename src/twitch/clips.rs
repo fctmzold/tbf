@@ -46,17 +46,13 @@ fn extract_slug(s: String) -> Result<Option<String>> {
                     };
                     Ok(Some(segments[0].to_string()))
                 }
-                _ => {
-                    Err(Clip::WrongURL(
-                        "Only twitch.tv URLs are supported".to_string(),
-                    ))?
-                }
-            },
-            None => {
-                Err(Clip::WrongURL(
+                _ => Err(Clip::WrongURL(
                     "Only twitch.tv URLs are supported".to_string(),
-                ))?
-            }
+                ))?,
+            },
+            None => Err(Clip::WrongURL(
+                "Only twitch.tv URLs are supported".to_string(),
+            ))?,
         },
         Err(_) => Ok(Some(s)),
     }

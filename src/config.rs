@@ -37,7 +37,6 @@ pub struct Cli {
     pub command: Option<Commands>,
 }
 
-
 #[derive(Subcommand, Clone, Debug, EnumMessage, EnumIter, Display, VariantNames, EnumString)]
 pub enum Commands {
     /// Combine all the parts (streamer's username, VOD/broadcast ID and a timestamp) into a proper m3u8 URL and check whether the VOD is available

@@ -282,12 +282,11 @@ pub fn fix(url: &str, output: Option<String>, old_method: bool, flags: Cli) -> R
                                         "Found the muted version of this .ts file - {url:?}"
                                     ))
                                 }
-                            } else if res.status() == 200
-                                && flags.verbose {
-                                    cloned_pb.println(format!(
-                                        "Found the unmuted version of this .ts file - {url:?}"
-                                    ))
-                                }
+                            } else if res.status() == 200 && flags.verbose {
+                                cloned_pb.println(format!(
+                                    "Found the unmuted version of this .ts file - {url:?}"
+                                ))
+                            }
                         });
                 } else {
                     initial_url_vec.par_iter_mut().for_each(|url| {

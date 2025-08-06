@@ -204,8 +204,6 @@ pub fn trim_newline(s: &mut String) {
     }
 }
 
-
-
 fn ask_for_value(desc: &str, buf: &mut String) {
     println!("{desc}");
     stdin().read_line(buf).expect("Failed to read line.");
@@ -213,26 +211,25 @@ fn ask_for_value(desc: &str, buf: &mut String) {
 }
 
 fn try_to_fix(valid_urls: Vec<ReturnURL>, matches: Cli) {
-    if !valid_urls.is_empty()
-        && valid_urls[0].muted {
-            let mut response = String::new();
+    if !valid_urls.is_empty() && valid_urls[0].muted {
+        let mut response = String::new();
 
-            ask_for_value(
-                "Do you want to download the fixed playlist? (Y/n)",
-                &mut response,
-            );
+        ask_for_value(
+            "Do you want to download the fixed playlist? (Y/n)",
+            &mut response,
+        );
 
-            match response.to_lowercase().as_str() {
-                "y" | "" => Commands::Fix {
-                    url: valid_urls[0].url.clone(),
-                    output: None,
-                    slow: false,
-                }
-                .execute(matches)
-                .expect("fix - shouldn't happen"),
-                _ => None,
-            };
-        }
+        match response.to_lowercase().as_str() {
+            "y" | "" => Commands::Fix {
+                url: valid_urls[0].url.clone(),
+                output: None,
+                slow: false,
+            }
+            .execute(matches)
+            .expect("fix - shouldn't happen"),
+            _ => None,
+        };
+    }
 }
 
 pub fn main_interface(mut matches: Cli) {

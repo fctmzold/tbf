@@ -1,13 +1,12 @@
 use anyhow::Result;
 use lazy_static::lazy_static;
-use log::debug;
-use log::info;
+use log::{debug, info, warn};
 use rand::prelude::IndexedMutRandom;
 use regex::Regex;
-use reqwest::header::USER_AGENT;
+use reqwest::{header::USER_AGENT, StatusCode};
 use scraper::{Html, Selector};
 use serde::Deserialize;
-use std::{ffi::OsStr, fs::File, io::Read, path::Path};
+use std::{ffi::OsStr, fs::File, io::Read, path::Path, thread::sleep, time::Duration};
 use time::{
     format_description::well_known::Rfc3339, macros::format_description, PrimitiveDateTime,
 };
@@ -94,17 +93,32 @@ pub async fn get_random_useragent() -> String {
 async fn process_url(url: &str) -> Result<Html> {
     let ua = get_random_useragent().await;
     debug!("Using UA - {ua}");
-    let init_resp = match crate::HTTP_CLIENT
+    let mut init_resp = crate::HTTP_CLIENT
         .get(url)
-        .header(USER_AGENT, ua)
+        .header(USER_AGENT, &ua)
         .send()
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => return Err(e)?,
-    };
+        .await;
 
-    let resp = match init_resp.error_for_status() {
+    for i in 1..=5 {
+        match init_resp {
+            Ok(ref r) => {
+                if r.status() == StatusCode::FORBIDDEN {
+                    warn!("Got a 403 on attempt #{i}");
+                    sleep(Duration::from_millis(50));
+                    init_resp = crate::HTTP_CLIENT
+                        .get(url)
+                        .header(USER_AGENT, &ua)
+                        .send()
+                        .await;
+                } else {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+
+    let resp = match init_resp?.error_for_status() {
         Ok(e) => e,
         Err(e) => return Err(e)?,
     };

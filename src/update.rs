@@ -18,7 +18,7 @@ struct GithubAssets {
     browser_download_url: String,
 }
 
-pub fn update(matches: Cli) -> Result<()> {
+pub async fn update(matches: Cli) -> Result<()> {
     let target_triple = guess_host_triple();
     let current_version = crate_version!();
     let cur_version_parsed = Version::parse(current_version).unwrap();
@@ -26,12 +26,13 @@ pub fn update(matches: Cli) -> Result<()> {
     let resp = crate::HTTP_CLIENT
         .get("https://api.github.com/repos/vyneer/tbf/releases/latest")
         .header(USER_AGENT, CURL_UA)
-        .send();
+        .send()
+        .await;
 
     let mut gh = match resp {
         Ok(r) => match r.status().is_success() {
             true => {
-                let gh: GithubUpdate = match r.json() {
+                let gh: GithubUpdate = match r.json().await {
                     Ok(v) => v,
                     Err(e) => return Err(e)?,
                 };

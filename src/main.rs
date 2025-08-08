@@ -17,10 +17,11 @@ use interface::main_interface;
 
 lazy_static! {
     // HTTP client to share
-    static ref HTTP_CLIENT: reqwest::blocking::Client = reqwest::blocking::Client::new();
+    static ref HTTP_CLIENT: reqwest::Client = reqwest::Client::new();
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     execute!(
         stdout(),
         SetTitle(format!("{} v{}", crate_name!(), crate_version!()))
@@ -54,10 +55,10 @@ fn main() {
     }));
 
     match matches.command {
-        Some(ref sub) => match sub.execute(matches.clone()) {
+        Some(ref sub) => match sub.execute(matches.clone()).await {
             Ok(_) => {}
             Err(e) => error!("{e}"),
         },
-        None => main_interface(matches),
+        None => main_interface(matches).await,
     }
 }

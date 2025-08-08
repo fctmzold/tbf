@@ -3,7 +3,6 @@ use lazy_static::lazy_static;
 use log::debug;
 use log::info;
 use rand::prelude::IndexedMutRandom;
-use rand::rng;
 use regex::Regex;
 use reqwest::header::USER_AGENT;
 use scraper::{Html, Selector};
@@ -56,19 +55,20 @@ pub fn info(text: String, simple: bool) {
     }
 }
 
-pub fn get_useragent_list() -> Vec<String> {
+pub async fn get_useragent_list() -> Vec<String> {
     let resp = crate::HTTP_CLIENT
         .get("https://jnrbsn.github.io/user-agents/user-agents.json")
-        .send();
+        .send()
+        .await;
 
     match resp {
         Ok(r) => match r.status().is_success() {
             true => {
-                let mut useragent_vec: Vec<String> = match r.json() {
+                let mut useragent_vec: Vec<String> = match r.json().await {
                     Ok(v) => v,
                     Err(_) => vec![],
                 };
-                // apparently streamscharts doesnt like when the useragent has "X11" in it
+                // apparently streamscharts doesnt like when the useragent has "X11"; in it
                 useragent_vec.retain(|a| !a.contains("X11;"));
                 useragent_vec
             }
@@ -78,11 +78,11 @@ pub fn get_useragent_list() -> Vec<String> {
     }
 }
 
-pub fn get_random_useragent() -> String {
-    let mut ua_vector = get_useragent_list();
+pub async fn get_random_useragent() -> String {
+    let mut ua_vector = get_useragent_list().await;
 
     if !ua_vector.is_empty() {
-        match ua_vector.choose_mut(&mut rng()) {
+        match ua_vector.choose_mut(&mut rand::rng()) {
             Some(ua) => ua.to_owned(),
             None => CURL_UA.to_string(),
         }
@@ -91,10 +91,15 @@ pub fn get_random_useragent() -> String {
     }
 }
 
-fn process_url(url: &str) -> Result<Html> {
-    let ua = get_random_useragent();
+async fn process_url(url: &str) -> Result<Html> {
+    let ua = get_random_useragent().await;
     debug!("Using UA - {ua}");
-    let init_resp = match crate::HTTP_CLIENT.get(url).header(USER_AGENT, ua).send() {
+    let init_resp = match crate::HTTP_CLIENT
+        .get(url)
+        .header(USER_AGENT, ua)
+        .send()
+        .await
+    {
         Ok(r) => r,
         Err(e) => return Err(e)?,
     };
@@ -104,14 +109,14 @@ fn process_url(url: &str) -> Result<Html> {
         Err(e) => return Err(e)?,
     };
 
-    let body = match resp.text() {
+    let body = match resp.text().await {
         Ok(b) => b,
         Err(e) => return Err(e)?,
     };
     Ok(Html::parse_document(&body))
 }
 
-pub fn derive_date_from_url(url: &str, flags: Cli) -> Result<(ProcessingType, URLData)> {
+pub async fn derive_date_from_url(url: &str, flags: Cli) -> Result<(ProcessingType, URLData)> {
     match Url::parse(url) {
         Ok(resolved_url) => match resolved_url.domain() {
             Some(domain) => match domain.to_lowercase().as_str() {
@@ -128,7 +133,7 @@ pub fn derive_date_from_url(url: &str, flags: Cli) -> Result<(ProcessingType, UR
                         if segments[1] == "streams" {
                             let username = segments[0];
                             let broadcast_id = segments[2];
-                            let fragment = match process_url(url) {
+                            let fragment = match process_url(url).await {
                                 Ok(f) => f,
                                 Err(e) => Err(e)?,
                             };
@@ -180,7 +185,7 @@ pub fn derive_date_from_url(url: &str, flags: Cli) -> Result<(ProcessingType, UR
                         if segments[0] == "channels" && segments[2] == "streams" {
                             let username = segments[1];
                             let broadcast_id = segments[3];
-                            let fragment = match process_url(url) {
+                            let fragment = match process_url(url).await {
                                 Ok(f) => f,
                                 Err(e) => Err(e)?,
                             };
@@ -533,9 +538,7 @@ mod tests {
         let path_json = dir.path().join("cdn_test.json");
         let mut file_json = File::create(path_json.clone()).unwrap();
 
-        writeln!(file_json, "{{").unwrap();
-        writeln!(file_json, "\"cdns\": [\"test.cloudflare.net\"]").unwrap();
-        writeln!(file_json, "}}").unwrap();
+        writeln!(file_json, "{{\n\"cdns\": [\"test.cloudflare.net\"]\n}}").unwrap();
 
         let mut res_json = compile_cdn_list(Some(path_json.to_str().unwrap().to_string()));
         res_json.sort();
@@ -555,12 +558,12 @@ mod tests {
         let path_yaml1 = dir.path().join("cdn_test.yaml");
         let mut file_yaml1 = File::create(path_yaml1.clone()).unwrap();
 
-        writeln!(file_yaml1, "\"cdns\": [\"test.cloudflare.net\"]").unwrap();
+        writeln!(file_yaml1, "cdns: [\"test.cloudflare.net\"]").unwrap();
 
         let path_yaml2 = dir.path().join("cdn_test.yml");
         let mut file_yaml2 = File::create(path_yaml2.clone()).unwrap();
 
-        writeln!(file_yaml2, "\"cdns\": [\"test.cloudflare.net\"]").unwrap();
+        writeln!(file_yaml2, "cdns: [\"test.cloudflare.net\"]").unwrap();
 
         let mut res_yaml1 = compile_cdn_list(Some(path_yaml1.to_str().unwrap().to_string()));
         res_yaml1.sort();
@@ -625,13 +628,14 @@ mod tests {
         );
     }
 
-    #[test]
-    fn derive_date() {
+    #[tokio::test]
+    async fn derive_date() {
         assert_eq!(
             derive_date_from_url(
                 "https://twitchtracker.com/forsen/streams/39619965384",
                 Cli::default()
             )
+            .await
             .unwrap(),
             (
                 ProcessingType::Exact,
@@ -647,6 +651,7 @@ mod tests {
 
         assert_eq!(
             derive_date_from_url("https://streamscharts.com/channels/robcdee/streams/39648192487", Cli::default())
+                .await
                 .unwrap(),
             (
                 ProcessingType::Exact,
@@ -662,6 +667,7 @@ mod tests {
 
         assert_eq!(
             derive_date_from_url("https://streamscharts.com/channels/forsen/streams/39619965384", Cli {mode: Some(ProcessingType::Exact), ..Default::default()})
+                .await
                 .unwrap(),
             (
                 ProcessingType::Exact,
@@ -677,6 +683,7 @@ mod tests {
 
         assert_eq!(
             derive_date_from_url("https://streamscharts.com/channels/forsen/streams/39619965384", Cli {mode: Some(ProcessingType::Bruteforce), ..Default::default()})
+                .await
                 .unwrap(),
             (
                 ProcessingType::Bruteforce,
@@ -691,26 +698,29 @@ mod tests {
         );
 
         assert!(
-            derive_date_from_url("https://google.com", Cli::default()).is_err(),
+            derive_date_from_url("https://google.com", Cli::default())
+                .await
+                .is_err(),
             "testing wrong link - https://google.com"
         );
-        assert!(derive_date_from_url("https://twitchtracker.com/forsen/streams/3961965384", Cli::default()).is_err(), "testing wrong twitchtracker link 1 - https://twitchtracker.com/forsen/streams/3961965384");
-        assert!(derive_date_from_url("https://streamscharts.com/channels/forsen/streams/3961965384", Cli::default()).is_err(), "testing wrong streamscharts link 1 - https://streamscharts.com/channels/forsen/streams/3961965384");
-        assert!(derive_date_from_url("https://twitchtracker.com/forsen/sreams/39619965384", Cli::default()).is_err(), "testing wrong twitchtracker link 2 - https://twitchtracker.com/forsen/sreams/39619965384");
-        assert!(derive_date_from_url("https://streamscharts.com/channels/forsen/sreams/39619965384", Cli::default()).is_err(), "testing wrong streamscharts link 2 - https://streamscharts.com/channels/forsen/sreams/39619965384");
+        assert!(derive_date_from_url("https://twitchtracker.com/forsen/streams/3961965384", Cli::default()).await.is_err(), "testing wrong twitchtracker link 1 - https://twitchtracker.com/forsen/streams/3961965384");
+        assert!(derive_date_from_url("https://streamscharts.com/channels/forsen/streams/3961965384", Cli::default()).await.is_err(), "testing wrong streamscharts link 1 - https://streamscharts.com/channels/forsen/streams/3961965384");
+        assert!(derive_date_from_url("https://twitchtracker.com/forsen/sreams/39619965384", Cli::default()).await.is_err(), "testing wrong twitchtracker link 2 - https://twitchtracker.com/forsen/sreams/39619965384");
+        assert!(derive_date_from_url("https://streamscharts.com/channels/forsen/sreams/39619965384", Cli::default()).await.is_err(), "testing wrong streamscharts link 2 - https://streamscharts.com/channels/forsen/sreams/39619965384");
     }
 
-    #[test]
+    #[tokio::test]
     #[ignore]
-    fn streamscharts_useragent_check() {
+    async fn streamscharts_useragent_check() {
         let url = "https://streamscharts.com/channels/robcdee/streams/39648192487";
-        let ua_vec = get_useragent_list();
+        let ua_vec = get_useragent_list().await;
 
         for ua in ua_vec {
             let init_resp = crate::HTTP_CLIENT
                 .get(url)
                 .header(USER_AGENT, &ua)
                 .send()
+                .await
                 .unwrap();
             sleep(std::time::Duration::from_secs(2));
             assert_eq!(

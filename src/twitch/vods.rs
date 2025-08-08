@@ -1,10 +1,10 @@
 use anyhow::Result;
 use colored::*;
-use indicatif::{ParallelProgressIterator, ProgressBar, ProgressIterator};
+use futures::stream::{self, StreamExt};
+use indicatif::{ProgressBar, ProgressIterator};
 use lazy_static::lazy_static;
 use log::{debug, error, info};
 use m3u8_rs::{parse_media_playlist_res, MediaPlaylist, MediaSegment};
-use rayon::prelude::*;
 use regex::Regex;
 use reqwest::StatusCode;
 use sha1::{Digest, Sha1};
@@ -21,7 +21,7 @@ lazy_static! {
     static ref FIX_REGEX: Regex = Regex::new(r"[^/]+").unwrap();
 }
 
-pub fn bruteforcer(
+pub async fn bruteforcer(
     username: &str,
     vod: i64,
     initial_from_stamp: &str,
@@ -64,68 +64,47 @@ pub fn bruteforcer(
     }
     debug!("Finished making urls.");
     let pb = ProgressBar::new(all_formats_vec.len() as u64);
-    let cloned_pb = pb.clone();
-    let iter = all_formats_vec.par_iter();
-    let iter_pb = all_formats_vec.par_iter().progress_with(pb);
 
-    let final_url: Option<&TwitchURL>;
-    if flags.progressbar {
-        final_url = iter_pb.find_any( |url| {
-            let res = crate::HTTP_CLIENT.get(url.full_url.clone()).send();
+    let fetches = stream::iter(all_formats_vec)
+        .map(|url| async {
+            let res = crate::HTTP_CLIENT.get(url.full_url.clone()).send().await;
+            if flags.progressbar {
+                pb.inc(1);
+            }
             match res {
-                Ok(res) => {
-                    match res.status() {
-                        StatusCode::OK => {
-                            if flags.verbose {
-                                cloned_pb.println(format!("Got it! - {url:?}"));
-                            }
-                            true
+                Ok(res) => match res.status() {
+                    StatusCode::OK => {
+                        if flags.verbose {
+                            pb.println(format!("Got it! - {url:?}"));
                         }
-                        StatusCode::FORBIDDEN | StatusCode::NOT_FOUND => {
-                            if flags.verbose {
-                                cloned_pb.println(format!("Still going - {url:?}"));
-                            }
-                            false
+                        Some(url)
+                    }
+                    StatusCode::FORBIDDEN | StatusCode::NOT_FOUND => {
+                        if flags.verbose {
+                            pb.println(format!("Still going - {url:?}"));
                         }
-                        _ => {
-                            cloned_pb.println(format!("You might be getting throttled (or your connection is dead)! Status code: {} - URL: {}", res.status(), res.url()));
-                            false
-                        }
+                        None
+                    }
+                    _ => {
+                        pb.println(format!(
+                                "You might be getting throttled (or your connection is dead)! Status code: {} - URL: {}",
+                                res.status(),
+                                res.url()
+                            ));
+                        None
                     }
                 },
                 Err(e) => {
-                    cloned_pb.println(format!("Reqwest error: {e}"));
-                    false
+                    pb.println(format!("Reqwest error: {e}"));
+                    None
                 }
             }
         })
-    } else {
-        final_url = iter.find_any( |url| {
-            let res = crate::HTTP_CLIENT.get(url.full_url.clone()).send();
-            match res {
-                Ok(res) => {
-                    match res.status() {
-                        StatusCode::OK => {
-                            debug!("Got it! - {url:?}");
-                            true
-                        }
-                        StatusCode::FORBIDDEN | StatusCode::NOT_FOUND => {
-                            debug!("Still going - {url:?}");
-                            false
-                        }
-                        _ => {
-                            info(format!("You might be getting throttled (or your connection is dead)! Status code: {} - URL: {}", res.status(), res.url()), flags.simple);
-                            false
-                        }
-                    }
-                },
-                Err(e) => {
-                    info(format!("Reqwest error: {e}"), flags.simple);
-                    false
-                }
-            }
-        });
-    }
+        .buffer_unordered(flags.threads)
+        .collect::<Vec<Option<TwitchURL>>>()
+        .await;
+
+    let final_url: Option<TwitchURL> = fetches.into_iter().flatten().next();
 
     match final_url {
         Some(final_url) => {
@@ -135,7 +114,8 @@ pub fn bruteforcer(
                 vod,
                 &final_url.timestamp,
                 flags.clone(),
-            );
+            )
+            .await;
             if !valid_urls.is_empty() {
                 if !flags.simple {
                     info!(
@@ -167,7 +147,7 @@ pub fn bruteforcer(
     }
 }
 
-pub fn exact(
+pub async fn exact(
     username: &str,
     vod: i64,
     initial_stamp: &str,
@@ -188,7 +168,8 @@ pub fn exact(
         vod,
         &number,
         flags.clone(),
-    );
+    )
+    .await;
     if !valid_urls.is_empty() {
         if !flags.simple {
             info!(
@@ -212,7 +193,7 @@ pub fn exact(
     }
 }
 
-pub fn fix(url: &str, output: Option<String>, old_method: bool, flags: Cli) -> Result<()> {
+pub async fn fix(url: &str, output: Option<String>, old_method: bool, flags: Cli) -> Result<()> {
     if !(url.contains("twitch.tv") || url.contains("cloudfront.net")) {
         error!("Only twitch.tv and cloudfront.net URLs are supported");
         Err(PlaylistFix::URL)?;
@@ -227,11 +208,11 @@ pub fn fix(url: &str, output: Option<String>, old_method: bool, flags: Cli) -> R
         base_url_parts[1], base_url_parts[2], base_url_parts[3]
     );
 
-    let res = match crate::HTTP_CLIENT.get(url).send() {
+    let res = match crate::HTTP_CLIENT.get(url).send().await {
         Ok(r) => r,
         Err(e) => return Err(e)?,
     };
-    let body = match res.text() {
+    let body = match res.text().await {
         Ok(r) => r,
         Err(e) => return Err(e)?,
     };
@@ -254,56 +235,53 @@ pub fn fix(url: &str, output: Option<String>, old_method: bool, flags: Cli) -> R
                 ..Default::default()
             };
             if old_method {
-                let mut initial_url_vec: Vec<String> = Vec::new();
-                let segments = pl.segments.clone();
-                for segment in segments {
-                    let url = format!("{}{}", base_url, segment.uri);
-                    initial_url_vec.push(url);
-                }
-                if flags.progressbar {
-                    let pb = ProgressBar::new(initial_url_vec.len() as u64);
-                    let cloned_pb = pb.clone();
-                    initial_url_vec
-                        .par_iter_mut()
-                        .progress_with(pb)
-                        .for_each(|url| {
+                let initial_url_vec: Vec<String> = pl
+                    .segments
+                    .iter()
+                    .map(|segment| format!("{}{}", base_url, segment.uri))
+                    .collect();
+
+                let pb = ProgressBar::new(initial_url_vec.len() as u64);
+
+                let mut fetches = stream::iter(initial_url_vec)
+                    .map(|mut url| {
+                        let pb_clone = pb.clone();
+                        async move {
                             let mut remove_chars = 3;
-                            let res = crate::HTTP_CLIENT.get(url.clone()).send().expect("Error");
+                            let res = crate::HTTP_CLIENT
+                                .get(url.clone())
+                                .send()
+                                .await
+                                .expect("Error");
+                            if flags.progressbar {
+                                pb_clone.inc(1);
+                            }
                             if res.status() == 403 {
                                 if url.contains("unmuted") {
                                     remove_chars = 11;
                                 }
-                                *url = format!(
+                                url = format!(
                                     "{}-muted.ts",
                                     &url.clone()[..url.len() - remove_chars]
                                 );
                                 if flags.verbose {
-                                    cloned_pb.println(format!(
+                                    pb_clone.println(format!(
                                         "Found the muted version of this .ts file - {url:?}"
                                     ))
                                 }
                             } else if res.status() == 200 && flags.verbose {
-                                cloned_pb.println(format!(
+                                pb_clone.println(format!(
                                     "Found the unmuted version of this .ts file - {url:?}"
                                 ))
                             }
-                        });
-                } else {
-                    initial_url_vec.par_iter_mut().for_each(|url| {
-                        let mut remove_chars = 3;
-                        let res = crate::HTTP_CLIENT.get(url.clone()).send().expect("Error");
-                        if res.status() == 403 {
-                            if url.contains("unmuted") {
-                                remove_chars = 11;
-                            }
-                            *url = format!("{}-muted.ts", &url.clone()[..url.len() - remove_chars]);
-                            debug!("Found the muted version of this .ts file - {url:?}")
-                        } else if res.status() == 200 {
-                            debug!("Found the unmuted version of this .ts file - {url:?}")
+                            url
                         }
-                    });
-                }
-                let initial_url_vec = &mut initial_url_vec[..];
+                    })
+                    .buffer_unordered(flags.threads)
+                    .collect::<Vec<String>>()
+                    .await;
+
+                let initial_url_vec = &mut fetches[..];
                 alphanumeric_sort::sort_str_slice(initial_url_vec);
                 for (i, segment) in pl.segments.iter().enumerate() {
                     playlist.segments.push(MediaSegment {
@@ -315,7 +293,6 @@ pub fn fix(url: &str, output: Option<String>, old_method: bool, flags: Cli) -> R
                 }
             } else if flags.progressbar {
                 let pb = ProgressBar::new(pl.segments.len() as u64);
-                let cloned_pb = pb.clone();
                 for segment in pl.segments.iter().progress_with(pb) {
                     let url = format!("{}{}", base_url, segment.uri);
                     if segment.uri.contains("unmuted") {
@@ -326,9 +303,7 @@ pub fn fix(url: &str, output: Option<String>, old_method: bool, flags: Cli) -> R
                             ..Default::default()
                         });
                         if flags.verbose {
-                            cloned_pb.println(format!(
-                                "Found the muted version of this .ts file - {url:?}"
-                            ))
+                            println!("Found the muted version of this .ts file - {url:?}")
                         }
                     } else {
                         playlist.segments.push(MediaSegment {
@@ -337,9 +312,7 @@ pub fn fix(url: &str, output: Option<String>, old_method: bool, flags: Cli) -> R
                             ..Default::default()
                         });
                         if flags.verbose {
-                            cloned_pb.println(format!(
-                                "Found the unmuted version of this .ts file - {url:?}"
-                            ))
+                            println!("Found the unmuted version of this .ts file - {url:?}")
                         }
                     }
                 }
@@ -386,10 +359,10 @@ pub fn fix(url: &str, output: Option<String>, old_method: bool, flags: Cli) -> R
     Ok(())
 }
 
-pub fn live(username: &str, flags: Cli) -> Result<Option<Vec<ReturnURL>>> {
-    match util::find_bid_from_username(username, flags.clone()) {
+pub async fn live(username: &str, flags: Cli) -> Result<Option<Vec<ReturnURL>>> {
+    match util::find_bid_from_username(username, flags.clone()).await {
         Ok(res) => match res {
-            Some((bid, stamp)) => exact(username, bid, stamp.as_str(), flags),
+            Some((bid, stamp)) => exact(username, bid, stamp.as_str(), flags).await,
             None => Ok(None),
         },
         Err(e) => Err(e)?,
@@ -405,7 +378,10 @@ mod util {
     use crate::config::Cli;
     use crate::twitch::models::{VodQuery, VodResponse, VodVars};
 
-    pub fn find_bid_from_username(username: &str, flags: Cli) -> Result<Option<(i64, String)>> {
+    pub async fn find_bid_from_username(
+        username: &str,
+        flags: Cli,
+    ) -> Result<Option<(i64, String)>> {
         let endpoint = "https://gql.twitch.tv/gql";
         let mut headers = HashMap::new();
         headers.insert("Client-ID", "kimne78kx3ncx6brgo4mv6wki5h1ko");
@@ -437,11 +413,11 @@ mod util {
             .json(&query)
             .headers(header_map.clone());
 
-        let re = match request.send() {
+        let re = match request.send().await {
             Ok(r) => r,
             Err(e) => return Err(e)?,
         };
-        let data: VodResponse = match re.json() {
+        let data: VodResponse = match re.json().await {
             Ok(d) => d,
             Err(e) => {
                 if !flags.simple {
@@ -473,8 +449,8 @@ mod tests {
 
     use super::{bruteforcer, exact as ex, fix};
 
-    #[test]
-    fn bruteforce() {
+    #[tokio::test]
+    async fn bruteforce() {
         let bf = bruteforcer(
             &"dansgaming",
             42218705421,
@@ -482,6 +458,7 @@ mod tests {
             &"2021-06-05 00:50:18",
             Cli::default(),
         )
+        .await
         .unwrap()
         .unwrap();
         let bf_comp: Vec<ReturnURL> = vec![ReturnURL {
@@ -501,6 +478,7 @@ mod tests {
             &"2021-06-05 00:50:18",
             Cli::default(),
         )
+        .await
         .unwrap();
 
         assert_eq!(bf_wrong, None, "testing bruteforce with no results");
@@ -511,19 +489,21 @@ mod tests {
             &"2022-07-12 1200",
             &"2022-07-12 12:00:41",
             Cli::default(),
-        );
+        )
+        .await;
 
         assert!(bf_err.is_err(), "testing invalid bruteforce");
     }
 
-    #[test]
-    fn exact() {
+    #[tokio::test]
+    async fn exact() {
         let e = ex(
             &"dansgaming",
             42218705421,
             &"2021-06-05 00:50:17",
             Cli::default(),
         )
+        .await
         .unwrap()
         .unwrap();
         let e_comp: Vec<ReturnURL> = vec![ReturnURL {
@@ -539,25 +519,26 @@ mod tests {
         let e_wrong = ex(
             &"dansgming",
             42218705421,
-            &"2021-06-05 00:50:17",
+            &"2021-06-.05 00:50:17",
             Cli::default(),
         )
+        .await
         .unwrap();
 
         assert_eq!(e_wrong, None, "testing exact with no results");
 
-        let e_err = ex(&"mrmouton", 39905263305, &"2022-07-12 1200", Cli::default());
+        let e_err = ex(&"mrmouton", 39905263305, &"2022-07-12 1200", Cli::default()).await;
 
         assert!(e_err.is_err(), "testing invalid exact");
     }
 
-    #[test]
-    fn fix_playlist() {
+    #[tokio::test]
+    async fn fix_playlist() {
         let dir = tempdir().unwrap();
 
         let path = dir.path().join("test.m3u8");
 
-        fix(&"https://d1m7jfoe9zdc1j.cloudfront.net/d3dcbaf880c9e36ed8c8_dansgaming_42218705421_1622854217/chunked/index-dvr.m3u8", Some(path.to_str().unwrap().to_string()), false, Cli::default()).unwrap();
+        fix(&"https://d1m7jfoe9zdc1j.cloudfront.net/d3dcbaf880c9e36ed8c8_dansgaming_42218705421_1622854217/chunked/index-dvr.m3u8", Some(path.to_str().unwrap().to_string()), false, Cli::default()).await.unwrap();
 
         let r = BufReader::new(File::open(path).unwrap());
         let mut count = 0;

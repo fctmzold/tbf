@@ -2,14 +2,13 @@ pub mod clips;
 pub mod models;
 pub mod vods;
 
-use indicatif::{ParallelProgressIterator, ProgressBar};
-use rayon::prelude::*;
+use futures::stream::{self, StreamExt};
 
 use crate::config::Cli;
 use crate::util::compile_cdn_list;
 use models::{AvailabilityCheck, ReturnURL};
 
-pub fn check_availability(
+pub async fn check_availability(
     hash: &String,
     username: &str,
     broadcast_id: i64,
@@ -17,7 +16,6 @@ pub fn check_availability(
     flags: Cli,
 ) -> Vec<ReturnURL> {
     let mut urls: Vec<AvailabilityCheck> = Vec::new();
-    let valid_urls: Vec<ReturnURL>;
     let cdn_urls_compiled = compile_cdn_list(flags.cdnfile);
     for cdn in cdn_urls_compiled {
         urls.push(AvailabilityCheck {
@@ -33,68 +31,39 @@ pub fn check_availability(
         });
     }
 
-    let pb = ProgressBar::new(urls.len() as u64);
-    let urls_iter = urls.par_iter();
-    let urls_iter_pb = urls.par_iter().progress_with(pb);
-
-    match flags.progressbar {
-        false => {
-            valid_urls = urls_iter
-                .filter_map(|url| {
-                    let unmuted = match crate::HTTP_CLIENT.get(url.fragment.as_str()).send() {
-                        Ok(r) => r.status(),
-                        Err(_) => return None,
-                    };
-                    let muted = match crate::HTTP_CLIENT.get(url.fragment_muted.as_str()).send() {
-                        Ok(r) => r.status(),
-                        Err(_) => return None,
-                    };
-                    if unmuted == 200 {
-                        Some(ReturnURL {
-                            url: url.playlist.clone(),
-                            muted: false,
-                        })
-                    } else if muted == 200 {
-                        Some(ReturnURL {
-                            url: url.playlist.clone(),
-                            muted: true,
-                        })
-                    } else {
-                        None
-                    }
+    let fetches = stream::iter(urls)
+        .map(|url| async move {
+            let unmuted = match crate::HTTP_CLIENT.get(url.fragment.as_str()).send().await {
+                Ok(r) => r.status(),
+                Err(_) => return None,
+            };
+            let muted = match crate::HTTP_CLIENT
+                .get(url.fragment_muted.as_str())
+                .send()
+                .await
+            {
+                Ok(r) => r.status(),
+                Err(_) => return None,
+            };
+            if unmuted == 200 {
+                Some(ReturnURL {
+                    url: url.playlist.clone(),
+                    muted: false,
                 })
-                .collect();
-        }
-        true => {
-            valid_urls = urls_iter_pb
-                .filter_map(|url| {
-                    let unmuted = match crate::HTTP_CLIENT.get(url.fragment.as_str()).send() {
-                        Ok(r) => r.status(),
-                        Err(_) => return None,
-                    };
-                    let muted = match crate::HTTP_CLIENT.get(url.fragment_muted.as_str()).send() {
-                        Ok(r) => r.status(),
-                        Err(_) => return None,
-                    };
-                    if unmuted == 200 {
-                        Some(ReturnURL {
-                            url: url.playlist.clone(),
-                            muted: false,
-                        })
-                    } else if muted == 200 {
-                        Some(ReturnURL {
-                            url: url.playlist.clone(),
-                            muted: true,
-                        })
-                    } else {
-                        None
-                    }
+            } else if muted == 200 {
+                Some(ReturnURL {
+                    url: url.playlist.clone(),
+                    muted: true,
                 })
-                .collect();
-        }
-    }
+            } else {
+                None
+            }
+        })
+        .buffer_unordered(flags.threads)
+        .collect::<Vec<Option<ReturnURL>>>()
+        .await;
 
-    valid_urls
+    fetches.into_iter().flatten().collect()
 }
 
 #[cfg(test)]
@@ -103,8 +72,8 @@ mod tests {
 
     use super::check_availability as ca;
 
-    #[test]
-    fn check_availability() {
+    #[tokio::test]
+    async fn check_availability() {
         // https://twitchtracker.com/dansgaming/streams/42218705421 - d3dcbaf880c9e36ed8c8_dansgaming_42218705421_1622854217 - 2021-06-05 00:50:17
         let ca_working: Vec<ReturnURL> = ca(
             &"d3dcbaf880c9e36ed8c8".to_string(),
@@ -112,7 +81,8 @@ mod tests {
             42218705421,
             &1622854217,
             Cli::default(),
-        );
+        )
+        .await;
 
         let comp_working: Vec<ReturnURL> = vec![ReturnURL {
             url: "https://d1m7jfoe9zdc1j.cloudfront.net/d3dcbaf880c9e36ed8c8_dansgaming_42218705421_1622854217/chunked/index-dvr.m3u8".to_string(),
@@ -134,7 +104,8 @@ mod tests {
             23722143840,
             &1479745189,
             Cli::default(),
-        );
+        )
+        .await;
 
         let comp_not_working: Vec<ReturnURL> = vec![];
 

@@ -1,4 +1,5 @@
 use anyhow::Result;
+use colored::Colorize;
 use log::error;
 use std::io::stdin;
 use strum::{EnumMessage, IntoEnumIterator};
@@ -106,21 +107,21 @@ impl Commands {
         }
     }
 
-    pub fn execute(&self, matches: Cli) -> Result<Option<Vec<ReturnURL>>> {
+    pub async fn execute(&self, matches: Cli) -> Result<Option<Vec<ReturnURL>>> {
         match self {
             Self::Exact {
                 username,
                 id,
                 stamp,
-            } => exact(username.as_str(), *id, stamp.as_str(), matches),
+            } => exact(username.as_str(), *id, stamp.as_str(), matches).await,
             Self::Bruteforce {
                 username,
                 id,
                 from,
                 to,
-            } => bruteforcer(username.as_str(), *id, from.as_str(), to.as_str(), matches),
+            } => bruteforcer(username.as_str(), *id, from.as_str(), to.as_str(), matches).await,
             Self::Link { url } => {
-                let (proc, data) = match derive_date_from_url(url, matches.clone()) {
+                let (proc, data) = match derive_date_from_url(url, matches.clone()).await {
                     Ok(a) => a,
                     Err(e) => {
                         return Err(e)?;
@@ -128,17 +129,20 @@ impl Commands {
                 };
 
                 match proc {
-                    ProcessingType::Exact => exact(
-                        data.username.as_str(),
-                        match data.broadcast_id.parse::<i64>() {
-                            Ok(b) => b,
-                            Err(e) => {
-                                return Err(e)?;
-                            }
-                        },
-                        data.start_date.as_str(),
-                        matches.clone(),
-                    ),
+                    ProcessingType::Exact => {
+                        exact(
+                            data.username.as_str(),
+                            match data.broadcast_id.parse::<i64>() {
+                                Ok(b) => b,
+                                Err(e) => {
+                                    return Err(e)?;
+                                }
+                            },
+                            data.start_date.as_str(),
+                            matches.clone(),
+                        )
+                        .await
+                    }
                     ProcessingType::Bruteforce => {
                         let end_date = match data.end_date {
                             Some(d) => d,
@@ -157,35 +161,38 @@ impl Commands {
                             end_date.as_str(),
                             matches.clone(),
                         )
+                        .await
                     }
                 }
             }
-            Self::Live { username } => live(username.as_str(), matches),
-            Self::Clip { clip } => match find_bid_from_clip(clip.clone(), matches.clone()) {
+            Self::Live { username } => live(username.as_str(), matches).await,
+            Self::Clip { clip } => match find_bid_from_clip(clip.clone(), matches.clone()).await {
                 Ok(r) => match r {
                     Some((username, vod)) => {
                         let url = format!("https://twitchtracker.com/{username}/streams/{vod}");
-                        let (_, data) = match derive_date_from_url(&url, matches.clone()) {
+                        let (_, data) = match derive_date_from_url(&url, matches.clone()).await {
                             Ok(a) => a,
                             Err(e) => Err(e)?,
                         };
 
-                        exact(&username, vod, &data.start_date, matches)
+                        exact(&username, vod, &data.start_date, matches).await
                     }
                     None => Ok(None),
                 },
                 Err(e) => Err(e)?,
             },
-            Self::Clipforce { id, start, end } => clip_bruteforce(*id, *start, *end, matches),
+            Self::Clipforce { id, start, end } => clip_bruteforce(*id, *start, *end, matches).await,
             Self::Fix { url, output, slow } => {
-                fix(url.as_str(), output.clone(), *slow, matches).expect("fix - shouldn't happen");
+                fix(url.as_str(), output.clone(), *slow, matches)
+                    .await
+                    .expect("fix - shouldn't happen");
 
                 // this might not be the right way to this
                 // but i want to combine everything into one method
                 Ok(None)
             }
             Self::Update => {
-                match update(matches) {
+                match update(matches).await {
                     Ok(_) => (),
                     Err(e) => return Err(e)?,
                 }
@@ -205,12 +212,12 @@ pub fn trim_newline(s: &mut String) {
 }
 
 fn ask_for_value(desc: &str, buf: &mut String) {
-    println!("{desc}");
+    println!("{}", desc.bright_blue());
     stdin().read_line(buf).expect("Failed to read line.");
     trim_newline(buf);
 }
 
-fn try_to_fix(valid_urls: Vec<ReturnURL>, matches: Cli) {
+async fn try_to_fix(valid_urls: Vec<ReturnURL>, matches: Cli) {
     if !valid_urls.is_empty() && valid_urls[0].muted {
         let mut response = String::new();
 
@@ -220,29 +227,33 @@ fn try_to_fix(valid_urls: Vec<ReturnURL>, matches: Cli) {
         );
 
         match response.to_lowercase().as_str() {
-            "y" | "" => Commands::Fix {
-                url: valid_urls[0].url.clone(),
-                output: None,
-                slow: false,
+            "y" | "" => {
+                Commands::Fix {
+                    url: valid_urls[0].url.clone(),
+                    output: None,
+                    slow: false,
+                }
+                .execute(matches)
+                .await
+                .expect("fix - shouldn't happen");
             }
-            .execute(matches)
-            .expect("fix - shouldn't happen"),
-            _ => None,
+            _ => (),
         };
     }
 }
 
-pub fn main_interface(mut matches: Cli) {
+pub async fn main_interface(mut matches: Cli) {
     // forcing the progress bar option on
     matches = Cli {
         progressbar: true,
+        threads: matches.threads,
         ..matches
     };
 
     loop {
         let mut mode = String::new();
 
-        println!("Select the application mode:");
+        println!("{}", "Select the application mode:".green());
         for (i, com) in Commands::iter().enumerate() {
             let selector = match com.to_selector() {
                 Some(str) => str,
@@ -253,12 +264,13 @@ pub fn main_interface(mut matches: Cli) {
             match com.show_description() {
                 true => println!(
                     "[{}] {} - {}",
-                    selector,
-                    name,
+                    selector.yellow(),
+                    name.bright_green(),
                     com.get_documentation()
                         .unwrap_or("<error - couldn't get mode description>")
+                        .italic()
                 ),
-                false => println!("[{selector}] {name}",),
+                false => println!("[{}] {}", selector.yellow(), name.bright_green()),
             }
         }
 
@@ -271,7 +283,7 @@ pub fn main_interface(mut matches: Cli) {
                     error!("{e}");
                     continue;
                 }
-                let valid_urls = match sub.execute(matches.clone()) {
+                let valid_urls = match sub.execute(matches.clone()).await {
                     Ok(u) => match u {
                         Some(u) => u,
                         None => Vec::new(),
@@ -281,7 +293,7 @@ pub fn main_interface(mut matches: Cli) {
                         continue;
                     }
                 };
-                try_to_fix(valid_urls, matches.clone());
+                try_to_fix(valid_urls, matches.clone()).await;
             }
             None => {
                 error!("Couldn't select the specified mode");

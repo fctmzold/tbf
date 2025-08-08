@@ -13,6 +13,9 @@ pub enum ProcessingType {
 #[derive(Parser, Clone, Debug, Default)]
 #[clap(author, version, about, long_about = None)]
 pub struct Cli {
+    /// Set the amount of threads to use
+    #[clap(short, long, default_value = "1000")]
+    pub threads: usize,
     /// Provide minimal output
     #[clap(short, long)]
     pub simple: bool,

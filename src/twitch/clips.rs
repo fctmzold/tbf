@@ -13,59 +13,49 @@ use crate::twitch::models::{ClipQuery, ClipResponse, ClipVars, ReturnURL};
 use crate::util::info;
 
 fn extract_slug(s: String) -> Result<Option<String>> {
-    match Url::parse(s.as_str()) {
-        Ok(resolved_url) => match resolved_url.domain() {
-            Some(domain) => match domain.to_lowercase().as_str() {
+    match Url::parse(&s) {
+        Ok(resolved_url) => {
+            let domain = resolved_url.domain().ok_or_else(|| {
+                Clip::WrongURL("Invalid URL".to_string())
+            })?;
+            
+            match domain.to_lowercase().as_str() {
                 "twitch.tv" | "www.twitch.tv" => {
-                    let segments = match resolved_url
+                    let segments: Vec<_> = resolved_url
                         .path_segments()
-                        .map(|c| c.collect::<Vec<_>>())
-                        .ok_or(Clip::SegmentMap)
-                    {
-                        Ok(s) => s,
-                        Err(e) => return Err(e)?,
-                    };
-                    if segments.len() > 1 {
-                        if segments[1] == "clip" {
-                            Ok(Some(segments[2].to_string()))
-                        } else {
-                            Err(Clip::WrongURL("Not a clip URL".to_string()))?
-                        }
+                        .map(|c| c.collect())
+                        .ok_or(Clip::SegmentMap)?;
+                        
+                    if segments.len() > 1 && segments[1] == "clip" {
+                        Ok(Some(segments[2].to_string()))
                     } else {
                         Err(Clip::WrongURL("Not a clip URL".to_string()))?
                     }
                 }
                 "clips.twitch.tv" => {
-                    let segments = match resolved_url
+                    let segments: Vec<_> = resolved_url
                         .path_segments()
-                        .map(|c| c.collect::<Vec<_>>())
-                        .ok_or(Clip::SegmentMap)
-                    {
-                        Ok(s) => s,
-                        Err(e) => return Err(e)?,
-                    };
+                        .map(|c| c.collect())
+                        .ok_or(Clip::SegmentMap)?;
+                        
                     Ok(Some(segments[0].to_string()))
                 }
                 _ => Err(Clip::WrongURL(
                     "Only twitch.tv URLs are supported".to_string(),
                 ))?,
-            },
-            None => Err(Clip::WrongURL(
-                "Only twitch.tv URLs are supported".to_string(),
-            ))?,
-        },
-        Err(_) => Ok(Some(s)),
+            }
+        }
+        Err(_) => Ok(Some(s)), // Assume it's already a slug
     }
 }
 
 pub async fn find_bid_from_clip(s: String, flags: Cli) -> Result<Option<(String, i64)>> {
     let slug = match extract_slug(s) {
-        Ok(s) => match s {
-            Some(s) => s,
-            None => return Ok(None),
-        },
+        Ok(Some(slug)) => slug,
+        Ok(None) => return Ok(None),
         Err(e) => return Err(e),
     };
+    
     let endpoint = "https://gql.twitch.tv/gql";
     let mut headers = HashMap::new();
     headers.insert("Client-ID", "kimne78kx3ncx6brgo4mv6wki5h1ko");
@@ -73,14 +63,8 @@ pub async fn find_bid_from_clip(s: String, flags: Cli) -> Result<Option<(String,
     let mut header_map = HeaderMap::new();
 
     for (str_key, str_value) in headers {
-        let key = match HeaderName::from_str(str_key) {
-            Ok(h) => h,
-            Err(e) => return Err(e)?,
-        };
-        let val = match HeaderValue::from_str(str_value) {
-            Ok(h) => h,
-            Err(e) => return Err(e)?,
-        };
+        let key = HeaderName::from_str(str_key)?;
+        let val = HeaderValue::from_str(str_value)?;
 
         header_map.insert(key, val);
     }
@@ -95,10 +79,7 @@ pub async fn find_bid_from_clip(s: String, flags: Cli) -> Result<Option<(String,
         .json(&query)
         .headers(header_map.clone());
 
-    let re = match request.send().await {
-        Ok(r) => r,
-        Err(e) => return Err(e)?,
-    };
+    let re = request.send().await?;
     let data: ClipResponse = match re.json().await {
         Ok(d) => d,
         Err(e) => {
@@ -108,12 +89,10 @@ pub async fn find_bid_from_clip(s: String, flags: Cli) -> Result<Option<(String,
             return Ok(None);
         }
     };
+    
     Ok(Some((
         data.data.clip.broadcaster.login,
-        match data.data.clip.broadcast.id.parse::<i64>() {
-            Ok(i) => i,
-            Err(e) => return Err(e)?,
-        },
+        data.data.clip.broadcast.id.parse::<i64>()?,
     )))
 }
 

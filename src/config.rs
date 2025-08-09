@@ -143,22 +143,20 @@ impl Commands {
     }
 
     pub fn from_selector(s: String) -> Option<Self> {
-        match s.parse::<usize>() {
-            Ok(s) => {
-                if s > 0 {
-                    let s = s - 1;
-                    match Self::VARIANTS.get(s) {
-                        Some(a) => Self::from_str(a).ok(),
-                        None => None,
-                    }
-                } else {
-                    None
-                }
+        // Try parsing as a number first
+        if let Ok(index) = s.parse::<usize>() {
+            // Convert to 0-based index
+            let zero_based_index = index.saturating_sub(1);
+            // Check if the index is within bounds
+            if let Some(variant) = Self::VARIANTS.get(zero_based_index) {
+                return Self::from_str(variant).ok();
             }
-            Err(_) => match s.as_str() {
-                "u" => Some(Self::Update),
-                _ => None,
-            },
+        }
+        
+        // Handle special cases
+        match s.as_str() {
+            "u" | "U" => Some(Self::Update),
+            _ => None,
         }
     }
 }

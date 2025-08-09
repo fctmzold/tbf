@@ -26,10 +26,7 @@ impl Commands {
                 ask_for_value("Please enter the streamer's username:", username);
 
                 ask_for_value("Please enter the VOD/broadcast ID:", &mut vod);
-                *id = match vod.parse::<i64>() {
-                    Ok(v) => v,
-                    Err(e) => Err(e)?,
-                };
+                *id = vod.parse::<i64>()?;
 
                 ask_for_value("Please enter the timestamp:", stamp);
 
@@ -46,10 +43,7 @@ impl Commands {
                 ask_for_value("Please enter the streamer's username:", username);
 
                 ask_for_value("Please enter the VOD/broadcast ID:", &mut vod);
-                *id = match vod.parse::<i64>() {
-                    Ok(v) => v,
-                    Err(e) => Err(e)?,
-                };
+                *id = vod.parse::<i64>()?;
 
                 ask_for_value("Please enter the first timestamp: [year]-[month]-[day] [hour]:[minute]:[second]", from);
                 ask_for_value("Please enter the last timestamp: [year]-[month]-[day] [hour]:[minute]:[second]", to);
@@ -74,28 +68,19 @@ impl Commands {
                 let mut end_string = String::new();
 
                 ask_for_value("Please enter the VOD/broadcast ID:", &mut id_string);
-                *id = match id_string.parse::<i64>() {
-                    Ok(v) => v,
-                    Err(e) => Err(e)?,
-                };
+                *id = id_string.parse::<i64>()?;
 
                 ask_for_value(
                     "Please enter the starting timestamp (in seconds):",
                     &mut start_string,
                 );
-                *start = match start_string.parse::<i64>() {
-                    Ok(v) => v,
-                    Err(e) => Err(e)?,
-                };
+                *start = start_string.parse::<i64>()?;
 
                 ask_for_value(
                     "Please enter the end timestamp (in seconds):",
                     &mut end_string,
                 );
-                *end = match end_string.parse::<i64>() {
-                    Ok(v) => v,
-                    Err(e) => Err(e)?,
-                };
+                *end = end_string.parse::<i64>()?;
 
                 Ok(())
             }
@@ -183,10 +168,9 @@ impl Commands {
             },
             Self::Clipforce { id, start, end } => clip_bruteforce(*id, *start, *end, matches).await,
             Self::Fix { url, output, slow } => {
-                fix(url.as_str(), output.clone(), *slow, matches)
-                    .await
-                    .expect("fix - shouldn't happen");
-
+                if let Err(e) = fix(url.as_str(), output.clone(), *slow, matches).await {
+                    error!("Failed to fix playlist: {e}");
+                }
                 // this might not be the right way to this
                 // but i want to combine everything into one method
                 Ok(None)
@@ -228,14 +212,14 @@ async fn try_to_fix(valid_urls: Vec<ReturnURL>, matches: Cli) {
 
         match response.to_lowercase().as_str() {
             "y" | "" => {
-                Commands::Fix {
+                let fix_command = Commands::Fix {
                     url: valid_urls[0].url.clone(),
                     output: None,
                     slow: false,
+                };
+                if let Err(e) = fix_command.execute(matches).await {
+                    error!("Failed to fix playlist: {e}");
                 }
-                .execute(matches)
-                .await
-                .expect("fix - shouldn't happen");
             }
             _ => (),
         };

@@ -66,6 +66,6 @@ async fn execute() -> Result<()> {
         }
         None => main_interface(matches).await,
     }
-    
+
     Ok(())
 }

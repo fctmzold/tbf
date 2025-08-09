@@ -55,7 +55,7 @@ pub async fn update(matches: Cli) -> Result<()> {
         } else {
             &gh.tag_name
         };
-        
+
         match Version::parse(tag_name) {
             Ok(new_version_parsed) => {
                 if new_version_parsed > cur_version_parsed {

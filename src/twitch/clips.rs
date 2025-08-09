@@ -15,17 +15,17 @@ use crate::util::info;
 fn extract_slug(s: String) -> Result<Option<String>> {
     match Url::parse(&s) {
         Ok(resolved_url) => {
-            let domain = resolved_url.domain().ok_or_else(|| {
-                Clip::WrongURL("Invalid URL".to_string())
-            })?;
-            
+            let domain = resolved_url
+                .domain()
+                .ok_or_else(|| Clip::WrongURL("Invalid URL".to_string()))?;
+
             match domain.to_lowercase().as_str() {
                 "twitch.tv" | "www.twitch.tv" => {
                     let segments: Vec<_> = resolved_url
                         .path_segments()
                         .map(|c| c.collect())
                         .ok_or(Clip::SegmentMap)?;
-                        
+
                     if segments.len() > 1 && segments[1] == "clip" {
                         Ok(Some(segments[2].to_string()))
                     } else {
@@ -37,7 +37,7 @@ fn extract_slug(s: String) -> Result<Option<String>> {
                         .path_segments()
                         .map(|c| c.collect())
                         .ok_or(Clip::SegmentMap)?;
-                        
+
                     Ok(Some(segments[0].to_string()))
                 }
                 _ => Err(Clip::WrongURL(
@@ -55,7 +55,7 @@ pub async fn find_bid_from_clip(s: String, flags: Cli) -> Result<Option<(String,
         Ok(None) => return Ok(None),
         Err(e) => return Err(e),
     };
-    
+
     let endpoint = "https://gql.twitch.tv/gql";
     let mut headers = HashMap::new();
     headers.insert("Client-ID", "kimne78kx3ncx6brgo4mv6wki5h1ko");
@@ -89,7 +89,7 @@ pub async fn find_bid_from_clip(s: String, flags: Cli) -> Result<Option<(String,
             return Ok(None);
         }
     };
-    
+
     Ok(Some((
         data.data.clip.broadcaster.login,
         data.data.clip.broadcast.id.parse::<i64>()?,

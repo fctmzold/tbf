@@ -152,7 +152,7 @@ impl Commands {
                 return Self::from_str(variant).ok();
             }
         }
-        
+
         // Handle special cases
         match s.as_str() {
             "u" | "U" => Some(Self::Update),

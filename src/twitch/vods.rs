@@ -193,11 +193,11 @@ pub async fn fix(url: &str, output: Option<String>, old_method: bool, flags: Cli
     for elem in FIX_REGEX.captures_iter(url) {
         base_url_parts.push(elem[0].to_string());
     }
-    
+
     if base_url_parts.len() < 4 {
         return Err(PlaylistFix::URL)?;
     }
-    
+
     let base_url = format!(
         "https://{}/{}/{}/",
         base_url_parts[1], base_url_parts[2], base_url_parts[3]
@@ -339,11 +339,11 @@ pub async fn fix(url: &str, output: Option<String>, old_method: bool, flags: Cli
 
     let mut file = std::fs::File::create(&path)?;
     playlist.write_to(&mut file)?;
-    
+
     if !flags.simple {
         info!("Playlist fixed and saved to: {}", path);
     }
-    
+
     Ok(())
 }
 
@@ -404,10 +404,7 @@ mod util {
             }
         };
         match data.data.user.stream {
-            Some(d) => Ok(Some((
-                d.id.parse::<i64>()?,
-                d.created_at,
-            ))),
+            Some(d) => Ok(Some((d.id.parse::<i64>()?, d.created_at))),
             None => Ok(None),
         }
     }

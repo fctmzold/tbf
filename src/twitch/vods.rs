@@ -149,39 +149,61 @@ pub async fn exact(
 ) -> Result<Option<Vec<ReturnURL>>> {
     let number = parse_timestamp(initial_stamp)?;
 
-    let mut hasher = Sha1::new();
-    hasher.update(format!("{username}_{vod}_{number}").as_str());
-    let hex_vec = hasher.finalize();
-    let hex = format!("{hex_vec:x}");
-    let valid_urls = check_availability(
-        &hex[0..20].to_string(),
-        username,
-        vod,
-        &number,
-        flags.clone(),
-    )
-    .await;
-    if !valid_urls.is_empty() {
-        if !flags.simple {
-            info!(
-                "Got the URL and it {} on Twitch servers. Here are the valid URLs:",
-                "was available".green()
-            );
-        }
-        for url in &valid_urls {
-            info(url.url.clone(), flags.simple);
-        }
-        Ok(Some(valid_urls))
-    } else {
-        if !flags.simple {
-            info!(
-                "Got the URL and it {} on Twitch servers :(",
-                "was NOT available".red()
-            );
-            info!("Here's the URL for debug purposes - https://vod-secure.twitch.tv/{}_{}_{}_{}/chunked/index-dvr.m3u8", &hex[0..20].to_string(), username, vod, &number);
-        }
-        Ok(None)
+    if !flags.simple {
+        info!(
+            "Checking for timestamps from {} to {} in an expanding range",
+            number - 10,
+            number + 10
+        );
     }
+
+    let mut offsets = vec![0];
+    for i in 1..=10 {
+        offsets.push(i);
+        offsets.push(-i);
+    }
+
+    for i in offsets {
+        let current_stamp = number + i;
+        let mut hasher = Sha1::new();
+        hasher.update(format!("{username}_{vod}_{current_stamp}").as_str());
+        let hex_vec = hasher.finalize();
+        let hex = format!("{hex_vec:x}");
+        let valid_urls = check_availability(
+            &hex[0..20].to_string(),
+            username,
+            vod,
+            &current_stamp,
+            flags.clone(),
+        )
+        .await;
+
+        if !valid_urls.is_empty() {
+            if !flags.simple {
+                info!(
+                    "Got the URL and it {} on Twitch servers. Here are the valid URLs:",
+                    "was available".green()
+                );
+            }
+            for url in &valid_urls {
+                info(url.url.clone(), flags.simple);
+            }
+            return Ok(Some(valid_urls));
+        }
+    }
+
+    if !flags.simple {
+        info!(
+            "Got the URL and it {} on Twitch servers :(",
+            "was NOT available".red()
+        );
+        let mut hasher = Sha1::new();
+        hasher.update(format!("{username}_{vod}_{number}").as_str());
+        let hex_vec = hasher.finalize();
+        let hex = format!("{hex_vec:x}");
+        info!("Here's the URL for debug purposes - https://vod-secure.twitch.tv/{}_{}_{}_{}/chunked/index-dvr.m3u8", &hex[0..20].to_string(), username, vod, &number);
+    }
+    Ok(None)
 }
 
 pub async fn fix(url: &str, output: Option<String>, old_method: bool, flags: Cli) -> Result<()> {

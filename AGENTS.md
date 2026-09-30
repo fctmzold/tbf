@@ -13,7 +13,7 @@ This means:
 - follow proper style conventions for Rust and maximize code reuse (DRY)
 - avoid premature optimization: choose reasonable algorithmic complexity, but only add parallelization, SIMD, or extra crates when measured need justifies it
 - keep dependencies minimal: prefer std and simple code unless a small, well-maintained crate clearly reduces complexity without added overhead
-- leave no technical debt: no extra code beyond what is needed to solve the probleml
+- leave no technical debt: no extra code beyond what is needed to solve the problem
 
 ## Preferred Tools
 

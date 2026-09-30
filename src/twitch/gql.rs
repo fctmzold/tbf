@@ -51,6 +51,76 @@ fn extract_stream_info(response: GqlStreamInfoResponse) -> Result<Option<(i64, S
     Ok(None)
 }
 
+#[derive(Deserialize, Debug)]
+struct GqlVodTokenResponse {
+    data: Option<GqlVodTokenData>,
+}
+
+#[derive(Deserialize, Debug)]
+struct GqlVodTokenData {
+    #[serde(rename = "videoPlaybackAccessToken")]
+    video_playback_access_token: Option<GqlVodAccessToken>,
+}
+
+#[derive(Deserialize, Debug)]
+struct GqlVodAccessToken {
+    value: String,
+    signature: String,
+}
+
+/// Fetch the VOD playback token and signature for one video.
+///
+/// The token authorizes the Usher VOD manifest, which lists every quality
+/// variant. No hash guessing is involved.
+///
+/// # Arguments
+///
+/// * `client` - Shared HTTP client.
+/// * `vod_id` - Twitch video ID.
+///
+/// # Returns
+///
+/// `Some((token, signature))` when Twitch issues a token, `None` for
+/// restricted videos.
+///
+/// # Errors
+///
+/// Returns an error when the GQL request fails or the response cannot be
+/// parsed.
+pub async fn get_vod_token(client: &Client, vod_id: &str) -> Result<Option<(String, String)>> {
+    const ENDPOINT: &str = "https://gql.twitch.tv/gql";
+    const CLIENT_ID: &str = "kimne78kx3ncx6brgo4mv6wki5h1ko";
+    const QUERY: &str = "query($vodID: ID!) { videoPlaybackAccessToken(id: $vodID, params: {platform: \"web\", playerBackend: \"mediaplayer\", playerType: \"embed\"}) { value signature } }";
+
+    let payload = serde_json::json!({
+        "query": QUERY,
+        "variables": { "vodID": vod_id },
+    });
+
+    let response = client
+        .post(ENDPOINT)
+        .header("Client-ID", CLIENT_ID)
+        .json(&payload)
+        .send()
+        .await
+        .context("Failed to query Twitch GQL API for VOD token")?;
+
+    let parsed: GqlVodTokenResponse = response
+        .json()
+        .await
+        .context("Failed to parse GQL response")?;
+
+    Ok(extract_vod_token(parsed))
+}
+
+/// Extract the token pair from a VOD token response.
+fn extract_vod_token(response: GqlVodTokenResponse) -> Option<(String, String)> {
+    response
+        .data?
+        .video_playback_access_token
+        .map(|token| (token.value, token.signature))
+}
+
 /// Fetch the broadcast ID and start timestamp for a currently live stream.
 ///
 /// The metadata feeds the `exact` lookup, which reconstructs the hidden
@@ -138,5 +208,25 @@ mod tests {
             r#"{"data":{"user":{"stream":{"id":"not-a-number","createdAt":"2020-11-19T04:29:54Z"}}}}"#,
         );
         assert!(extract_stream_info(response).is_err());
+    }
+
+    #[test]
+    fn extracts_vod_token() {
+        let response: GqlVodTokenResponse = serde_json::from_str(
+            r#"{"data":{"videoPlaybackAccessToken":{"value":"{\"vod_id\":1}","signature":"sig"}}}"#,
+        )
+        .expect("fixture parses");
+        assert_eq!(
+            extract_vod_token(response),
+            Some(("{\"vod_id\":1}".to_string(), "sig".to_string()))
+        );
+    }
+
+    #[test]
+    fn missing_vod_token_yields_none() {
+        let response: GqlVodTokenResponse =
+            serde_json::from_str(r#"{"data":{"videoPlaybackAccessToken":null}}"#)
+                .expect("fixture parses");
+        assert!(extract_vod_token(response).is_none());
     }
 }

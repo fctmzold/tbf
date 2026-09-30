@@ -64,6 +64,11 @@ pub enum Commands {
         /// Streamer login name.
         username: String,
     },
+    /// List a channel's VODs with playable playlist links.
+    Vods {
+        /// Channel login name.
+        username: String,
+    },
     /// Fix an unplayable unmuted VOD playlist.
     Fix {
         /// Twitch VOD m3u8 playlist URL.

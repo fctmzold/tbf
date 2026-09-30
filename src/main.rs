@@ -48,6 +48,7 @@ async fn run() -> Result<()> {
             Some("clipforce") => prompt_clipforce()?,
             Some("link") => prompt_link()?,
             Some("live") => prompt_live()?,
+            Some("vods") => prompt_vods()?,
             Some("fix") => prompt_fix()?,
             _ => return Ok(()),
         }
@@ -83,6 +84,7 @@ async fn execute_command(command: Commands, client: &Client, flags: &Cli) -> Res
         }
         Commands::Link { url } => commands::link::execute(client, &url, flags).await,
         Commands::Live { username } => commands::live::execute(client, &username, flags).await,
+        Commands::Vods { username } => commands::vods::execute(client, &username, flags).await,
         Commands::Fix { url, output } => commands::fix::execute(client, &url, output, flags).await,
     }
 }
@@ -143,6 +145,12 @@ fn prompt_link() -> Result<Commands> {
 fn prompt_live() -> Result<Commands> {
     let username = prompt("Enter streamer's username:");
     Ok(Commands::Live { username })
+}
+
+/// Collect inputs for the vods command.
+fn prompt_vods() -> Result<Commands> {
+    let username = prompt("Enter channel name:");
+    Ok(Commands::Vods { username })
 }
 
 /// Collect inputs for the fix command.

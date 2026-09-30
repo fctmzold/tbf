@@ -37,7 +37,26 @@ pub fn parse_timestamp(stamp: &str) -> Result<i64, AppError> {
         return Ok(naive.and_utc().timestamp());
     }
 
+    if let Ok(naive) = NaiveDateTime::parse_from_str(stamp, "%Y-%m-%d %H:%M") {
+        return Ok(naive.and_utc().timestamp());
+    }
+
     Err(AppError::InvalidTimestamp(stamp.to_string()))
+}
+
+/// Format a Unix epoch as RFC3339 UTC for echoing parsed input.
+///
+/// # Arguments
+///
+/// * `timestamp` - Unix epoch seconds.
+///
+/// # Returns
+///
+/// RFC3339 string, or the raw number when out of range.
+pub fn format_utc(timestamp: i64) -> String {
+    chrono::DateTime::from_timestamp(timestamp, 0)
+        .map(|moment| moment.to_rfc3339())
+        .unwrap_or_else(|| timestamp.to_string())
 }
 
 #[cfg(test)]
@@ -63,6 +82,16 @@ mod tests {
             parse_timestamp("2020-11-19 04:29:54").unwrap(),
             1_605_760_194
         );
+    }
+
+    #[test]
+    fn parses_datetime_without_seconds() {
+        assert_eq!(parse_timestamp("2020-11-19 04:29").unwrap(), 1_605_760_140);
+    }
+
+    #[test]
+    fn formats_utc_echo() {
+        assert_eq!(format_utc(1_605_760_194), "2020-11-19T04:29:54+00:00");
     }
 
     #[test]

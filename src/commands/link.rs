@@ -13,6 +13,8 @@ use crate::util::parse_timestamp;
 /// `channels/<user>/streams/<id>` URLs are supported. The ID is the Twitch
 /// broadcast ID, verified against live pages.
 ///
+/// `pub(crate)` so interactive prompts can validate URLs too.
+///
 /// # Arguments
 ///
 /// * `url` - Stream page URL.
@@ -25,7 +27,7 @@ use crate::util::parse_timestamp;
 ///
 /// Returns an error for unparsable URLs, unsupported hosts or paths, and
 /// non-numeric IDs.
-fn parse_tracker_target(page_url: &str) -> Result<(String, i64)> {
+pub(crate) fn parse_tracker_target(page_url: &str) -> Result<(String, i64)> {
     let parsed = url::Url::parse(page_url).context("Invalid URL")?;
     let host = parsed
         .host_str()
@@ -60,7 +62,7 @@ fn parse_tracker_target(page_url: &str) -> Result<(String, i64)> {
 pub async fn execute(client: &Client, url: &str, flags: &Cli) -> Result<()> {
     let target = parse_tracker_target(url)?;
     let (username, id) = target;
-    println!("Detected Username: {username}, ID: {id}");
+    eprintln!("Detected Username: {username}, ID: {id}");
 
     let response = with_retry(
         || async {
@@ -116,10 +118,10 @@ pub async fn execute(client: &Client, url: &str, flags: &Cli) -> Result<()> {
         anyhow::bail!("Could not extract timestamps from the provided URL.");
     }
 
-    println!("Extracted timestamps: {timestamps:?}");
-    println!("Running Exact search around the extracted timestamp...");
+    eprintln!("Extracted timestamps: {timestamps:?}");
+    eprintln!("Running Exact search around the extracted timestamp...");
     let start = parse_timestamp(&timestamps[0]).context("Failed to parse extracted timestamp")?;
-    exact::execute(client, &username, id, &start.to_string(), flags).await
+    exact::execute(client, &username, id, start, flags).await
 }
 
 #[cfg(test)]

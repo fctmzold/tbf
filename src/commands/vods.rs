@@ -84,18 +84,20 @@ async fn resolve_video(client: &Client, video: &Video) -> Result<Option<Vec<Vari
 /// Returns an error when the video listing cannot be fetched.
 pub async fn execute(client: &Client, username: &str, video_type: &str, flags: &Cli) -> Result<()> {
     let username = username.to_lowercase();
-    if !flags.simple {
-        println!("Fetching VOD list for '{username}'...");
-    }
+    eprintln!("Fetching VOD list for '{username}'...");
 
     let all = videos::fetch_all_videos(client, &username, videos::broadcast_filter(video_type))
         .await
         .context("Failed to fetch channel videos")?;
     if all.is_empty() {
-        println!("No videos found for '{username}'.");
+        eprintln!("No videos found for '{username}'.");
         return Ok(());
     }
-    println!("Found {} videos.", all.len());
+    eprintln!("Found {} videos.", all.len());
+
+    // Piped or minimal output carries only variant URLs; the rich blocks
+    // below stay on interactive terminals.
+    let urls_only = flags.simple || !std::io::IsTerminal::is_terminal(&std::io::stdout());
 
     let progress = scanning_progress(
         all.len() as u64,
@@ -125,39 +127,61 @@ pub async fn execute(client: &Client, username: &str, video_type: &str, flags: &
     let mut with_playlist = 0_u64;
     let mut failed = 0_u64;
     for (video, result) in resolved {
-        let mut message = format!(
-            "{}\n  Link: {}\n  Duration: {}   Views: {}   Game: {}",
-            video.summary(),
-            video.url(),
-            videos::format_duration(video.duration_seconds),
-            video
-                .view_count
-                .map(|views| views.to_string())
-                .unwrap_or_else(|| "-".to_string()),
-            video.game_name.as_deref().unwrap_or("-")
-        );
         match result {
             Ok(Some(variants)) => {
+                with_playlist += 1;
+                if urls_only {
+                    for variant in &variants {
+                        println!("{}", variant.url);
+                    }
+                    continue;
+                }
+                let mut message = format!(
+                    "{}\n  Link: {}\n  Duration: {}   Views: {}   Game: {}",
+                    video.summary(),
+                    video.url(),
+                    videos::format_duration(video.duration_seconds),
+                    video
+                        .view_count
+                        .map(|views| views.to_string())
+                        .unwrap_or_else(|| "-".to_string()),
+                    video.game_name.as_deref().unwrap_or("-")
+                );
                 for variant in &variants {
                     message.push_str(&format!("\n  [{}] {}", variant.label, variant.url));
                 }
-                with_playlist += 1;
+                emit(progress.as_ref(), message);
             }
-            Ok(None) => message.push_str("\n  No playable playlist found."),
+            Ok(None) => {
+                if !urls_only {
+                    emit(
+                        progress.as_ref(),
+                        format!(
+                            "{}\n  Link: {}\n  No playable playlist found.",
+                            video.summary(),
+                            video.url()
+                        ),
+                    );
+                }
+            }
             Err(error) => {
-                message.push_str(&format!("\n  Lookup failed: {error:#}"));
                 failed += 1;
+                if !urls_only {
+                    emit(
+                        progress.as_ref(),
+                        format!("{}\n  Lookup failed: {error:#}", video.summary()),
+                    );
+                }
             }
         }
-        emit(progress.as_ref(), message);
     }
 
     if let Some(bar) = progress {
         bar.finish_with_message("Scan complete");
     }
-    println!("{with_playlist} videos with playable playlists.");
+    eprintln!("{with_playlist} videos with playable playlists.");
     if failed > 0 {
-        println!("Warning: {failed} lookups failed; some playlists may be missing.");
+        eprintln!("Warning: {failed} lookups failed; some playlists may be missing.");
     }
     Ok(())
 }

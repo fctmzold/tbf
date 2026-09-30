@@ -105,6 +105,9 @@ pub fn playlist_url(cdn: &str, stem: &str, quality: &str) -> String {
     format!("https://{cdn}/{stem}/{quality}/index-dvr.m3u8")
 }
 
+/// Number of probed CDN hosts.
+pub const DEFAULT_CDN_COUNT: usize = DEFAULT_CDNS.len();
+
 /// Number of HEAD probes per timestamp (CDNs times qualities).
 ///
 /// # Returns
@@ -179,13 +182,41 @@ pub async fn check_availability(
     timestamp: i64,
     concurrency: usize,
 ) -> ScanOutcome {
+    check_qualities(client, username, vod_id, timestamp, QUALITIES, concurrency).await
+}
+
+/// Probe selected quality variants at a timestamp.
+///
+/// Same as `check_availability` but restricted to `qualities`, so callers
+/// can probe `chunked` first and expand only on hits.
+///
+/// # Arguments
+///
+/// * `client` - Shared HTTP client.
+/// * `username` - Streamer login name.
+/// * `vod_id` - VOD/broadcast ID.
+/// * `timestamp` - Unix epoch seconds.
+/// * `qualities` - Variants to probe, in output order.
+/// * `concurrency` - Maximum simultaneous HEAD requests.
+///
+/// # Returns
+///
+/// Hits and failed-probe count.
+pub async fn check_qualities(
+    client: &Client,
+    username: &str,
+    vod_id: i64,
+    timestamp: i64,
+    qualities: &[&str],
+    concurrency: usize,
+) -> ScanOutcome {
     let stem = url_stem(username, vod_id, timestamp);
     let candidates: Vec<(usize, usize, String)> = DEFAULT_CDNS
         .iter()
         .enumerate()
         .flat_map(|(cdn_index, cdn)| {
             let stem = stem.clone();
-            QUALITIES
+            qualities
                 .iter()
                 .enumerate()
                 .map(move |(quality_index, quality)| {
@@ -197,20 +228,18 @@ pub async fn check_availability(
     let probed: Vec<(usize, usize, Option<VodInfo>, bool)> = stream::iter(candidates)
         .map(|(cdn_index, quality_index, url)| {
             let client = client.clone();
+            let quality = qualities[quality_index].to_string();
             async move {
                 match probe_head(&client, &url).await {
-                    Probe::Hit => {
-                        let quality = QUALITIES[quality_index].to_string();
-                        (
-                            cdn_index,
-                            quality_index,
-                            Some(VodInfo {
-                                playlist_url: url,
-                                quality,
-                            }),
-                            false,
-                        )
-                    }
+                    Probe::Hit => (
+                        cdn_index,
+                        quality_index,
+                        Some(VodInfo {
+                            playlist_url: url,
+                            quality,
+                        }),
+                        false,
+                    ),
                     Probe::Miss => (cdn_index, quality_index, None, false),
                     Probe::Failed => (cdn_index, quality_index, None, true),
                 }

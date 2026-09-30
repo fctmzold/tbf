@@ -1,5 +1,24 @@
 use clap::{Parser, Subcommand};
 
+use crate::util::parse_timestamp;
+
+/// Parse a timestamp argument at the CLI boundary.
+///
+/// # Arguments
+///
+/// * `raw` - Raw argument text.
+///
+/// # Returns
+///
+/// Unix epoch seconds.
+///
+/// # Errors
+///
+/// Returns the parse failure message for clap to display.
+fn parse_cli_timestamp(raw: &str) -> Result<i64, String> {
+    parse_timestamp(raw).map_err(|error| error.to_string())
+}
+
 /// Twitch Broadcast Finder command-line arguments.
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Twitch Broadcast Finder", long_about = None)]
@@ -26,24 +45,37 @@ pub struct Cli {
 #[derive(Subcommand, Debug)]
 pub enum Commands {
     /// Check a specific timestamp for a VOD.
+    ///
+    /// Example: `tbf exact arquel 316969565142 "2026-09-30 10:00"`.
     Exact {
         /// Streamer login name.
         username: String,
         /// VOD/broadcast ID.
         id: i64,
-        /// Timestamp as Unix epoch, RFC3339, or YYYY-MM-DD HH:MM:SS.
-        stamp: String,
+        /// Timestamp: unix epoch, RFC3339, or `YYYY-MM-DD HH:MM[:SS]` (UTC).
+        #[arg(value_parser = parse_cli_timestamp)]
+        stamp: i64,
     },
     /// Bruteforce a range of timestamps to find a VOD.
+    ///
+    /// Example: `tbf bruteforce arquel 316969565142 1790752800 1790752900`.
     Bruteforce {
         /// Streamer login name.
         username: String,
         /// VOD/broadcast ID.
         id: i64,
         /// Range start timestamp.
-        from: String,
+        #[arg(value_parser = parse_cli_timestamp)]
+        from: i64,
         /// Range end timestamp.
-        to: String,
+        #[arg(value_parser = parse_cli_timestamp)]
+        to: i64,
+        /// Keep scanning after the first hit.
+        #[arg(long)]
+        all: bool,
+        /// Skip the large-range confirmation.
+        #[arg(long)]
+        yes: bool,
     },
     /// Find available clips within a VOD time range.
     Clipforce {

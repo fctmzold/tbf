@@ -66,15 +66,16 @@ pub async fn execute(client: &Client, id: i64, start: i64, end: i64, flags: &Cli
     }
 
     if failed > 0 {
-        println!("Warning: {failed} of {total} probes failed; results may be incomplete.");
+        eprintln!("Warning: {failed} of {total} probes failed; results may be incomplete.");
     }
     if found.is_empty() {
         if failed == total {
             anyhow::bail!("All {total} probes failed; check your connection and try again.");
         }
-        println!("Could not find any clips in the specified range.");
+        eprintln!("Could not find any clips in the specified range.");
+        crate::report::hint("widen the offset range");
     } else {
-        println!("Found {} clips:", found.len());
+        eprintln!("Found {} clips:", found.len());
         for url in found {
             println!("{url}");
         }

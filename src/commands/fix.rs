@@ -176,7 +176,7 @@ pub async fn execute(
         .context("Failed to write M3U8 to buffer")?;
     file.write_all(&buffer).context("Failed to write to file")?;
 
-    println!(
+    eprintln!(
         "Swapped {swapped} of {candidate_count} unmuted segments to muted ({failed} probes failed); saved to: {output_name}",
     );
     Ok(())

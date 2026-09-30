@@ -2,15 +2,62 @@ use anyhow::{Context, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
+use crate::twitch::gql::GQL_ENDPOINT;
+use crate::twitch::retry::{check_http_status, classify_request, with_retry, Failure};
+
 /// Twitch persisted-query hash for channel video listings.
 ///
 /// Twitch rotates these periodically; a sudden empty list for a channel
 /// with VODs usually means this hash needs updating.
 const VIDEO_TOWER_HASH: &str = "67004f7881e65c297936f32c75246470629557a393788fb5a69d6d9a25a8fd5f";
 const VIDEO_TOWER_OPERATION: &str = "FilterableVideoTower_Videos";
-const GQL_ENDPOINT: &str = "https://gql.twitch.tv/gql";
+/// Anonymous client ID accepted for persisted video queries.
+///
+/// Deliberately different from the GQL client ID: persisted queries only
+/// work with client IDs Twitch whitelisted for them.
 const GQL_CLIENT_ID: &str = "ue6666qo983tsx6so1t0vnawi233wa";
 const PAGE_SIZE: u32 = 100;
+
+/// Map a `--type` filter name to the API broadcast type.
+///
+/// # Arguments
+///
+/// * `name` - `all`, `archive`, `highlight`, or `upload`.
+///
+/// # Returns
+///
+/// API value, or `None` for unfiltered listings.
+pub fn broadcast_filter(name: &str) -> Option<&'static str> {
+    match name {
+        "archive" => Some("ARCHIVE"),
+        "highlight" => Some("HIGHLIGHT"),
+        "upload" => Some("UPLOAD"),
+        _ => None,
+    }
+}
+
+/// Format seconds as `H:MM:SS` or `M:SS` for list output.
+///
+/// # Arguments
+///
+/// * `seconds` - Length in seconds, if known.
+///
+/// # Returns
+///
+/// Human duration, or `--:--` when unknown.
+pub fn format_duration(seconds: Option<i64>) -> String {
+    match seconds {
+        None => "--:--".to_string(),
+        Some(total) => {
+            let (hours, minutes, secs) = (total / 3600, total % 3600 / 60, total % 60);
+            if hours > 0 {
+                format!("{hours}:{minutes:02}:{secs:02}")
+            } else {
+                format!("{minutes}:{secs:02}")
+            }
+        }
+    }
+}
 
 /// One channel video (VOD, highlight, or upload).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -216,10 +263,15 @@ fn parse_videos_page(body: &str, channel: &str) -> Result<VideosPage> {
 
 /// Fetch one page of a channel's videos (newest first).
 ///
+/// Permanent failures (unknown channel, bad query hash, 4xx) return
+/// immediately; transient ones retry.
+///
 /// # Arguments
 ///
 /// * `client` - Shared HTTP client.
 /// * `channel` - Channel login name.
+/// * `broadcast_type` - API filter (`ARCHIVE`, `HIGHLIGHT`, `UPLOAD`), or
+///   `None` for everything.
 /// * `cursor` - Pagination cursor, empty for the first page.
 ///
 /// # Returns
@@ -230,12 +282,17 @@ fn parse_videos_page(body: &str, channel: &str) -> Result<VideosPage> {
 ///
 /// Returns an error when the request fails, the response cannot be parsed,
 /// or the channel does not exist.
-pub async fn fetch_videos_page(client: &Client, channel: &str, cursor: &str) -> Result<VideosPage> {
+pub async fn fetch_videos_page(
+    client: &Client,
+    channel: &str,
+    broadcast_type: Option<&str>,
+    cursor: &str,
+) -> Result<VideosPage> {
     let operations = [TowerOperation {
         operation_name: VIDEO_TOWER_OPERATION,
         variables: TowerVariables {
             channel_owner_login: channel.to_string(),
-            broadcast_type: None,
+            broadcast_type: broadcast_type.map(str::to_string),
             video_sort: "TIME",
             limit: PAGE_SIZE,
             cursor: cursor.to_string(),
@@ -250,35 +307,41 @@ pub async fn fetch_videos_page(client: &Client, channel: &str, cursor: &str) -> 
     let body =
         serde_json::to_string(&operations).context("Failed to encode video listing query")?;
 
-    let response = client
-        .post(GQL_ENDPOINT)
-        .header("Client-ID", GQL_CLIENT_ID)
-        .header("Content-Type", "text/plain;charset=UTF-8")
-        .body(body)
-        .send()
-        .await
-        .context("Failed to query Twitch video listing")?;
-    if !response.status().is_success() {
-        anyhow::bail!(
-            "Video listing fetch failed with status {}",
-            response.status()
-        );
-    }
-    let text = response
-        .text()
-        .await
-        .context("Failed to read video listing body")?;
-    parse_videos_page(&text, channel)
+    with_retry(
+        || async {
+            let response = client
+                .post(GQL_ENDPOINT)
+                .header("Client-ID", GQL_CLIENT_ID)
+                .header("Content-Type", "text/plain;charset=UTF-8")
+                .body(body.clone())
+                .send()
+                .await
+                .map_err(classify_request)?;
+            check_http_status(response.status())?;
+            let text = response.text().await.map_err(|error| {
+                (
+                    Failure::Permanent,
+                    anyhow::anyhow!("Failed to read video listing body: {error}"),
+                )
+            })?;
+            parse_videos_page(&text, channel).map_err(|error| (Failure::Permanent, error))
+        },
+        3,
+    )
+    .await
+    .context("Video listing request failed")
 }
 
 /// Fetch all of a channel's videos, newest first.
 ///
-/// Pages through the whole listing with retries per page.
+/// Pages through the whole listing. A repeated cursor aborts the walk
+/// instead of looping forever.
 ///
 /// # Arguments
 ///
 /// * `client` - Shared HTTP client.
 /// * `channel` - Channel login name.
+/// * `broadcast_type` - API filter (see `broadcast_filter`).
 ///
 /// # Returns
 ///
@@ -286,34 +349,25 @@ pub async fn fetch_videos_page(client: &Client, channel: &str, cursor: &str) -> 
 ///
 /// # Errors
 ///
-/// Returns an error when a page repeatedly fails to fetch or parse.
-pub async fn fetch_all_videos(client: &Client, channel: &str) -> Result<Vec<Video>> {
+/// Returns an error when a page repeatedly fails or pagination stalls.
+pub async fn fetch_all_videos(
+    client: &Client,
+    channel: &str,
+    broadcast_type: Option<&str>,
+) -> Result<Vec<Video>> {
     let mut cursor = String::new();
     let mut videos = Vec::new();
     loop {
-        let mut fetched = None;
-        let mut last_error = String::new();
-        for _ in 0..3 {
-            match fetch_videos_page(client, channel, &cursor).await {
-                Ok(page) => {
-                    fetched = Some(page);
-                    break;
+        let page = fetch_videos_page(client, channel, broadcast_type, &cursor).await?;
+        videos.extend(page.videos);
+        match page.next_cursor {
+            Some(next) if page.has_next => {
+                if next == cursor {
+                    anyhow::bail!("Video listing repeated a cursor; aborting.");
                 }
-                Err(error) => {
-                    last_error = format!("{error:#}");
-                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                }
+                cursor = next;
             }
-        }
-        match fetched {
-            Some(page) => {
-                videos.extend(page.videos);
-                match page.next_cursor {
-                    Some(next) if page.has_next => cursor = next,
-                    _ => break,
-                }
-            }
-            None => anyhow::bail!("Failed to fetch videos for '{channel}': {last_error}"),
+            _ => break,
         }
     }
     Ok(videos)
@@ -393,5 +447,29 @@ mod tests {
         assert!(page.videos.is_empty());
         assert!(!page.has_next);
         assert!(page.next_cursor.is_none());
+    }
+
+    #[test]
+    fn broadcast_filter_maps_names() {
+        assert_eq!(broadcast_filter("archive"), Some("ARCHIVE"));
+        assert_eq!(broadcast_filter("highlight"), Some("HIGHLIGHT"));
+        assert_eq!(broadcast_filter("upload"), Some("UPLOAD"));
+        assert_eq!(broadcast_filter("all"), None);
+        assert_eq!(broadcast_filter("bogus"), None);
+    }
+
+    #[test]
+    fn duration_formats_hours() {
+        assert_eq!(format_duration(Some(7265)), "2:01:05");
+    }
+
+    #[test]
+    fn duration_formats_minutes() {
+        assert_eq!(format_duration(Some(125)), "2:05");
+    }
+
+    #[test]
+    fn duration_handles_missing() {
+        assert_eq!(format_duration(None), "--:--");
     }
 }

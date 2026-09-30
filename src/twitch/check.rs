@@ -1,10 +1,9 @@
-use std::time::Duration;
-
 use futures::stream::{self, StreamExt};
 use reqwest::Client;
 use sha1::{Digest, Sha1};
 
 use crate::twitch::cdns::DEFAULT_CDNS;
+use crate::twitch::retry::{classify_request, with_retry, Failure};
 
 /// Quality variants probed directly via their `index-dvr.m3u8` playlists.
 pub const QUALITIES: &[&str] = &[
@@ -115,12 +114,10 @@ pub fn probe_total() -> usize {
     DEFAULT_CDNS.len() * QUALITIES.len()
 }
 
-/// Backoff between probe retries.
-fn backoff(attempt: u32) -> Duration {
-    Duration::from_millis(200 * 4_u64.pow(attempt))
-}
-
 /// HEAD a URL, retrying timeouts, 429s, and 5xx responses.
+///
+/// Persistent 429s and 5xx responses count as `Failed`, not `Miss`: the
+/// server never gave a usable answer.
 ///
 /// # Arguments
 ///
@@ -132,31 +129,30 @@ fn backoff(attempt: u32) -> Duration {
 /// `Hit` when the URL exists, `Miss` when the server says it does not,
 /// `Failed` when no usable answer arrived.
 pub async fn probe_head(client: &Client, url: &str) -> Probe {
-    const ATTEMPTS: u32 = 3;
-    for attempt in 0..ATTEMPTS {
-        let last = attempt + 1 == ATTEMPTS;
-        match client.head(url).send().await {
-            Ok(response) => {
-                let status = response.status();
-                if status.is_success() {
-                    return Probe::Hit;
-                }
-                if !last && (status.as_u16() == 429 || status.is_server_error()) {
-                    tokio::time::sleep(backoff(attempt)).await;
-                    continue;
-                }
-                return Probe::Miss;
-            }
-            Err(error) => {
-                if !last && error.is_timeout() {
-                    tokio::time::sleep(backoff(attempt)).await;
-                    continue;
-                }
-                return Probe::Failed;
+    match with_retry(|| head_once(client, url), 3).await {
+        Ok(probe) => probe,
+        Err(_) => Probe::Failed,
+    }
+}
+
+/// One HEAD attempt with error classification for retries.
+async fn head_once(client: &Client, url: &str) -> Result<Probe, (Failure, anyhow::Error)> {
+    match client.head(url).send().await {
+        Ok(response) => {
+            let status = response.status();
+            if status.is_success() {
+                Ok(Probe::Hit)
+            } else if status.as_u16() == 429 || status.is_server_error() {
+                Err((
+                    Failure::Transient,
+                    anyhow::anyhow!("HEAD {url} answered {status}"),
+                ))
+            } else {
+                Ok(Probe::Miss)
             }
         }
+        Err(error) => Err(classify_request(error)),
     }
-    Probe::Failed
 }
 
 /// Probe default CDNs for `index-dvr.m3u8` playlists at a timestamp.
@@ -375,12 +371,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn persistent_server_error_is_miss() {
+    async fn persistent_server_error_is_failed() {
         let client = Client::new();
         let base = serve(vec![500, 500, 500]);
         assert_eq!(
             probe_head(&client, &format!("{base}/x.m3u8")).await,
-            Probe::Miss
+            Probe::Failed
         );
     }
 }

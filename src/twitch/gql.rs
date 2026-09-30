@@ -2,6 +2,13 @@ use anyhow::{Context, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
+use crate::twitch::retry::{check_http_status, classify_request, with_retry, Failure};
+
+/// Shared Twitch GraphQL endpoint.
+pub const GQL_ENDPOINT: &str = "https://gql.twitch.tv/gql";
+/// Public client ID used by third-party Twitch tools.
+pub const GQL_CLIENT_ID: &str = "kimne78kx3ncx6brgo4mv6wki5h1ko";
+
 #[derive(Serialize)]
 struct GqlStreamInfoQuery {
     query: String,
@@ -88,8 +95,6 @@ struct GqlVodAccessToken {
 /// Returns an error when the GQL request fails or the response cannot be
 /// parsed.
 pub async fn get_vod_token(client: &Client, vod_id: &str) -> Result<Option<(String, String)>> {
-    const ENDPOINT: &str = "https://gql.twitch.tv/gql";
-    const CLIENT_ID: &str = "kimne78kx3ncx6brgo4mv6wki5h1ko";
     const QUERY: &str = "query($vodID: ID!) { videoPlaybackAccessToken(id: $vodID, params: {platform: \"web\", playerBackend: \"mediaplayer\", playerType: \"embed\"}) { value signature } }";
 
     let payload = serde_json::json!({
@@ -97,18 +102,27 @@ pub async fn get_vod_token(client: &Client, vod_id: &str) -> Result<Option<(Stri
         "variables": { "vodID": vod_id },
     });
 
-    let response = client
-        .post(ENDPOINT)
-        .header("Client-ID", CLIENT_ID)
-        .json(&payload)
-        .send()
-        .await
-        .context("Failed to query Twitch GQL API for VOD token")?;
-
-    let parsed: GqlVodTokenResponse = response
-        .json()
-        .await
-        .context("Failed to parse GQL response")?;
+    let parsed: GqlVodTokenResponse = with_retry(
+        || async {
+            let response = client
+                .post(GQL_ENDPOINT)
+                .header("Client-ID", GQL_CLIENT_ID)
+                .json(&payload)
+                .send()
+                .await
+                .map_err(classify_request)?;
+            check_http_status(response.status())?;
+            response.json().await.map_err(|error| {
+                (
+                    Failure::Permanent,
+                    anyhow::anyhow!("Failed to parse GQL response: {error}"),
+                )
+            })
+        },
+        3,
+    )
+    .await
+    .context("VOD token request failed")?;
 
     Ok(extract_vod_token(parsed))
 }
@@ -140,8 +154,6 @@ fn extract_vod_token(response: GqlVodTokenResponse) -> Option<(String, String)> 
 /// Returns an error when the GQL request fails, the response cannot be
 /// parsed, or the stream ID is not numeric.
 pub async fn get_stream_info(client: &Client, username: &str) -> Result<Option<(i64, String)>> {
-    const ENDPOINT: &str = "https://gql.twitch.tv/gql";
-    const CLIENT_ID: &str = "kimne78kx3ncx6brgo4mv6wki5h1ko";
     const QUERY: &str =
         "query($login: String!) { user(login: $login) { stream { id createdAt } } }";
 
@@ -152,18 +164,27 @@ pub async fn get_stream_info(client: &Client, username: &str) -> Result<Option<(
         },
     };
 
-    let response = client
-        .post(ENDPOINT)
-        .header("Client-ID", CLIENT_ID)
-        .json(&payload)
-        .send()
-        .await
-        .context("Failed to query Twitch GQL API for stream info")?;
-
-    let parsed: GqlStreamInfoResponse = response
-        .json()
-        .await
-        .context("Failed to parse GQL response")?;
+    let parsed: GqlStreamInfoResponse = with_retry(
+        || async {
+            let response = client
+                .post(GQL_ENDPOINT)
+                .header("Client-ID", GQL_CLIENT_ID)
+                .json(&payload)
+                .send()
+                .await
+                .map_err(classify_request)?;
+            check_http_status(response.status())?;
+            response.json().await.map_err(|error| {
+                (
+                    Failure::Permanent,
+                    anyhow::anyhow!("Failed to parse GQL response: {error}"),
+                )
+            })
+        },
+        3,
+    )
+    .await
+    .context("Stream info request failed")?;
 
     extract_stream_info(parsed)
 }

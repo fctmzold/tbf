@@ -54,9 +54,9 @@ pub enum Commands {
         /// End offset in seconds.
         end: i64,
     },
-    /// Extract data from a TwitchTracker or StreamsCharts URL.
+    /// Extract data from a StreamsCharts stream page URL.
     Link {
-        /// TwitchTracker or StreamsCharts URL.
+        /// StreamsCharts stream page URL.
         url: String,
     },
     /// Get the VOD of a currently live stream.
@@ -68,6 +68,9 @@ pub enum Commands {
     Vods {
         /// Channel login name.
         username: String,
+        /// Video kind: all, archive, highlight, or upload.
+        #[arg(long = "type", default_value = "all", value_parser = ["all", "archive", "highlight", "upload"])]
+        video_type: String,
     },
     /// Fix an unplayable unmuted VOD playlist.
     Fix {
@@ -75,6 +78,9 @@ pub enum Commands {
         url: String,
         /// Output file path. Defaults to fixed_playlist.m3u8.
         output: Option<String>,
+        /// Overwrite the output file when it exists.
+        #[arg(long)]
+        force: bool,
     },
 }
 

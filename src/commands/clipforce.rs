@@ -24,7 +24,7 @@ pub async fn execute(client: &Client, id: i64, start: i64, end: i64, flags: &Cli
         anyhow::bail!("Start offset must be before end offset");
     }
 
-    let total = (end - start) as u64;
+    let total = (end - start + 1) as u64;
     let progress = scanning_progress(
         total,
         "Scanning for clips...",
@@ -32,7 +32,7 @@ pub async fn execute(client: &Client, id: i64, start: i64, end: i64, flags: &Cli
         flags.progressbar,
     );
 
-    let (found, failed) = stream::iter(start..end)
+    let (found, failed) = stream::iter(start..=end)
         .map(|offset| {
             let client = client.clone();
             let progress = progress.clone();
@@ -69,7 +69,7 @@ pub async fn execute(client: &Client, id: i64, start: i64, end: i64, flags: &Cli
         println!("Warning: {failed} of {total} probes failed; results may be incomplete.");
     }
     if found.is_empty() {
-        if total > 0 && failed == total {
+        if failed == total {
             anyhow::bail!("All {total} probes failed; check your connection and try again.");
         }
         println!("Could not find any clips in the specified range.");

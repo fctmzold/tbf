@@ -20,7 +20,7 @@ const COMMAND_LABELS: [&str; 8] = [
     "Exact - Check specific timestamp",
     "Bruteforce - Search timestamp range",
     "Clipforce - Scan for clips",
-    "Link - Extract from TwitchTracker",
+    "Link - Extract from StreamsCharts",
     "Live - Find currently live VOD",
     "Vods - List channel VODs with links",
     "Fix - Fix unmuted playlist",
@@ -68,9 +68,14 @@ fn inner_hit(column: u16, area: Rect) -> bool {
 ///
 /// Returns an error when terminal setup, drawing, or event reading fails.
 pub fn run() -> Result<Option<String>> {
-    // `init` installs a panic hook, so a panic cannot leave the terminal
-    // in raw mode or on the alternate screen.
-    let mut terminal = ratatui::init();
+    // `try_init` installs a panic hook restoring the terminal; the extra
+    // hook below also releases mouse capture, which ratatui leaves alone.
+    let mut terminal = ratatui::try_init()?;
+    let previous_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = execute!(std::io::stdout(), DisableMouseCapture);
+        previous_hook(info);
+    }));
     execute!(terminal.backend_mut(), EnableMouseCapture)?;
 
     let outcome = run_loop(&mut terminal);

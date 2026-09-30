@@ -36,6 +36,19 @@ pub fn scanning_progress(
     Some(bar)
 }
 
+/// Print one message without breaking an active progress bar.
+///
+/// # Arguments
+///
+/// * `bar` - Active progress bar, if any.
+/// * `message` - Complete message printed as one block.
+pub fn emit(bar: Option<&ProgressBar>, message: String) {
+    match bar {
+        Some(bar) => bar.println(message),
+        None => println!("{message}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

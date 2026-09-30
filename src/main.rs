@@ -84,8 +84,13 @@ async fn execute_command(command: Commands, client: &Client, flags: &Cli) -> Res
         }
         Commands::Link { url } => commands::link::execute(client, &url, flags).await,
         Commands::Live { username } => commands::live::execute(client, &username, flags).await,
-        Commands::Vods { username } => commands::vods::execute(client, &username, flags).await,
-        Commands::Fix { url, output } => commands::fix::execute(client, &url, output, flags).await,
+        Commands::Vods {
+            username,
+            video_type,
+        } => commands::vods::execute(client, &username, &video_type, flags).await,
+        Commands::Fix { url, output, force } => {
+            commands::fix::execute(client, &url, output, force, flags).await
+        }
     }
 }
 
@@ -137,7 +142,7 @@ fn prompt_clipforce() -> Result<Commands> {
 
 /// Collect inputs for the link command.
 fn prompt_link() -> Result<Commands> {
-    let url = prompt("Enter TwitchTracker or StreamsCharts URL:");
+    let url = prompt("Enter StreamsCharts stream page URL:");
     Ok(Commands::Link { url })
 }
 
@@ -150,7 +155,10 @@ fn prompt_live() -> Result<Commands> {
 /// Collect inputs for the vods command.
 fn prompt_vods() -> Result<Commands> {
     let username = prompt("Enter channel name:");
-    Ok(Commands::Vods { username })
+    Ok(Commands::Vods {
+        username,
+        video_type: "all".to_string(),
+    })
 }
 
 /// Collect inputs for the fix command.
@@ -165,5 +173,6 @@ fn prompt_fix() -> Result<Commands> {
     Ok(Commands::Fix {
         url,
         output: output_option,
+        force: false,
     })
 }

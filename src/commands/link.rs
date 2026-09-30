@@ -4,20 +4,22 @@ use scraper::{Html, Selector};
 
 use crate::cli::Cli;
 use crate::commands::exact;
+use crate::twitch::retry::{check_http_status, classify_request, with_retry};
 use crate::util::parse_timestamp;
 
-/// Identify the streamer and VOD ID from a tracker URL.
+/// Identify the streamer and VOD ID from a StreamsCharts stream URL.
 ///
-/// Supports `twitchtracker.com/<user>/streams/<id>` and
-/// `streamscharts.com/channels/<user>/streams/<id>`.
+/// TwitchTracker has no per-stream pages, so only StreamsCharts
+/// `channels/<user>/streams/<id>` URLs are supported. The ID is the Twitch
+/// broadcast ID, verified against live pages.
 ///
 /// # Arguments
 ///
-/// * `url` - Tracker page URL.
+/// * `url` - Stream page URL.
 ///
 /// # Returns
 ///
-/// Lowercase username and VOD ID.
+/// Lowercase username and broadcast ID.
 ///
 /// # Errors
 ///
@@ -35,11 +37,8 @@ fn parse_tracker_target(page_url: &str) -> Result<(String, i64)> {
         .unwrap_or_default();
 
     let (username, id_text) = match (host, segments.as_slice()) {
-        ("twitchtracker.com", [username, "streams", id]) => (*username, *id),
         ("streamscharts.com", ["channels", username, "streams", id]) => (*username, *id),
-        _ => anyhow::bail!(
-            "Unsupported tracker URL: expected a TwitchTracker or StreamsCharts stream page"
-        ),
+        _ => anyhow::bail!("Unsupported tracker URL: expected a StreamsCharts stream page"),
     };
     let id = id_text
         .parse::<i64>()
@@ -52,7 +51,7 @@ fn parse_tracker_target(page_url: &str) -> Result<(String, i64)> {
 /// # Arguments
 ///
 /// * `client` - Shared HTTP client.
-/// * `url` - TwitchTracker or StreamsCharts URL.
+/// * `url` - StreamsCharts stream page URL.
 /// * `flags` - Global CLI flags.
 ///
 /// # Errors
@@ -63,17 +62,22 @@ pub async fn execute(client: &Client, url: &str, flags: &Cli) -> Result<()> {
     let (username, id) = target;
     println!("Detected Username: {username}, ID: {id}");
 
-    let response = client
-        .get(url)
-        .send()
-        .await
-        .context("Failed to fetch URL")?;
-    if !response.status().is_success() {
-        anyhow::bail!(
-            "Tracker page fetch failed with status {}",
-            response.status()
-        );
-    }
+    let response = with_retry(
+        || async {
+            client
+                .get(url)
+                .send()
+                .await
+                .map_err(classify_request)
+                .and_then(|response| {
+                    check_http_status(response.status())?;
+                    Ok(response)
+                })
+        },
+        3,
+    )
+    .await
+    .context("Failed to fetch tracker page")?;
     let html = response.text().await.context("Failed to read HTML")?;
     let document = Html::parse_document(&html);
 
@@ -123,15 +127,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_twitchtracker_url() {
-        let (username, id) =
-            parse_tracker_target("https://twitchtracker.com/Arquel/streams/316969565142")
-                .expect("valid tracker URL");
-        assert_eq!(username, "arquel");
-        assert_eq!(id, 316_969_565_142);
-    }
-
-    #[test]
     fn parses_streamscharts_url() {
         let (username, id) =
             parse_tracker_target("https://streamscharts.com/channels/xqc/streams/12345")
@@ -141,13 +136,22 @@ mod tests {
     }
 
     #[test]
+    fn rejects_twitchtracker_shape() {
+        assert!(
+            parse_tracker_target("https://twitchtracker.com/arquel/streams/316969565142").is_err()
+        );
+    }
+
+    #[test]
     fn rejects_host_in_query_string() {
-        assert!(parse_tracker_target("https://example.com/?next=twitchtracker.com").is_err());
+        assert!(parse_tracker_target("https://example.com/?next=streamscharts.com").is_err());
     }
 
     #[test]
     fn rejects_non_numeric_id() {
-        assert!(parse_tracker_target("https://twitchtracker.com/user/streams/latest").is_err());
+        assert!(
+            parse_tracker_target("https://streamscharts.com/channels/user/streams/latest").is_err()
+        );
     }
 
     #[test]

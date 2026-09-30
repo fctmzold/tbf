@@ -1,11 +1,10 @@
 use std::collections::HashMap;
-use std::path::Path;
 
 use anyhow::{Context, Result};
 use futures::stream::{self, StreamExt};
 use m3u8_rs::{parse_playlist_res, Playlist};
 use reqwest::Client;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::Write;
 use url::Url;
 
@@ -37,25 +36,36 @@ fn muted_alternative(segment_url: &Url) -> Option<Url> {
     Some(url)
 }
 
-/// Resolve the output path, refusing to overwrite an existing file.
+/// Create the output file, refusing to overwrite unless forced.
+///
+/// Atomic `create_new` closes the check-then-create race: an existing file
+/// fails here instead of being truncated.
 ///
 /// # Arguments
 ///
 /// * `output` - User-supplied path or `None` for the default.
+/// * `force` - Overwrite an existing file.
 ///
 /// # Returns
 ///
-/// Writable output path.
+/// Open file handle.
 ///
 /// # Errors
 ///
-/// Returns an error when the resolved path already exists.
-fn resolve_output(output: Option<String>) -> Result<String> {
+/// Returns an error when the file exists and `force` is false, or when
+/// creation fails otherwise.
+fn create_output(output: Option<String>, force: bool) -> Result<File> {
     let path = output.unwrap_or_else(|| "fixed_playlist.m3u8".to_string());
-    if Path::new(&path).exists() {
-        anyhow::bail!("Refusing to overwrite existing file: {path}");
+    if force {
+        return File::create(&path).context("Failed to create output file");
     }
-    Ok(path)
+    match OpenOptions::new().write(true).create_new(true).open(&path) {
+        Ok(file) => Ok(file),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            anyhow::bail!("Refusing to overwrite existing file: {path} (use --force)")
+        }
+        Err(error) => Err(error).context("Failed to create output file"),
+    }
 }
 
 /// Rewrite an unmuted playlist, preferring muted segments when available.
@@ -68,6 +78,7 @@ fn resolve_output(output: Option<String>) -> Result<String> {
 /// * `client` - Shared HTTP client.
 /// * `url` - Source `index-dvr.m3u8` URL.
 /// * `output` - Output path, defaults to `fixed_playlist.m3u8`.
+/// * `force` - Overwrite the output file when it exists.
 /// * `flags` - Global CLI flags controlling concurrency.
 ///
 /// # Errors
@@ -78,9 +89,12 @@ pub async fn execute(
     client: &Client,
     url: &str,
     output: Option<String>,
+    force: bool,
     flags: &Cli,
 ) -> Result<()> {
-    let output_path = resolve_output(output)?;
+    let output_name = output
+        .clone()
+        .unwrap_or_else(|| "fixed_playlist.m3u8".to_string());
 
     let response = client
         .get(url)
@@ -121,35 +135,50 @@ pub async fn execute(
         })
         .collect();
 
-    let swaps: Vec<(usize, String)> = stream::iter(candidates)
+    let candidate_count = candidates.len();
+    let checked: Vec<(usize, Option<String>, bool)> = stream::iter(candidates)
         .map(|(index, muted)| {
             let client = client.clone();
             async move {
-                (probe_head(&client, muted.as_str()).await == Probe::Hit)
-                    .then(|| (index, muted.into()))
+                match probe_head(&client, muted.as_str()).await {
+                    Probe::Hit => (index, Some(muted.to_string()), false),
+                    Probe::Miss => (index, None, false),
+                    Probe::Failed => (index, None, true),
+                }
             }
         })
         .buffer_unordered(usize::from(flags.threads))
-        .filter_map(|item| async move { item })
         .collect()
         .await;
 
-    let swapped: HashMap<usize, String> = swaps.into_iter().collect();
+    let mut swapped = 0_usize;
+    let mut failed = 0_u64;
+    let mut replacements = HashMap::new();
+    for (index, muted, probe_failed) in checked {
+        if let Some(url) = muted {
+            replacements.insert(index, url);
+            swapped += 1;
+        }
+        if probe_failed {
+            failed += 1;
+        }
+    }
     for (index, segment) in playlist.segments.iter_mut().enumerate() {
-        segment.uri = swapped
-            .get(&index)
-            .cloned()
+        segment.uri = replacements
+            .remove(&index)
             .unwrap_or_else(|| absolute_uris[index].clone());
     }
 
-    let mut file = File::create(&output_path).context("Failed to create output file")?;
+    let mut file = create_output(output, force)?;
     let mut buffer = Vec::new();
     playlist
         .write_to(&mut buffer)
         .context("Failed to write M3U8 to buffer")?;
     file.write_all(&buffer).context("Failed to write to file")?;
 
-    println!("Successfully fixed playlist and saved to: {output_path}");
+    println!(
+        "Swapped {swapped} of {candidate_count} unmuted segments to muted ({failed} probes failed); saved to: {output_name}",
+    );
     Ok(())
 }
 
@@ -193,21 +222,30 @@ mod tests {
     }
 
     #[test]
-    fn resolves_missing_output_file() {
-        let missing = std::env::temp_dir().join("tbf-fix-missing-output.m3u8");
-        let _ = std::fs::remove_file(&missing);
-        let resolved = resolve_output(Some(missing.to_string_lossy().to_string()))
-            .expect("missing file resolves");
-        assert!(resolved.ends_with("tbf-fix-missing-output.m3u8"));
+    fn creates_missing_output_file() {
+        let path = std::env::temp_dir().join("tbf-fix-missing-output.m3u8");
+        let _ = std::fs::remove_file(&path);
+        create_output(Some(path.to_string_lossy().to_string()), false)
+            .expect("missing file is created");
+        assert!(path.exists());
+        std::fs::remove_file(&path).expect("fixture cleanup");
     }
 
     #[test]
     fn rejects_existing_output_file() {
         let path = std::env::temp_dir().join("tbf-fix-clobber-test.m3u8");
         std::fs::write(&path, "data").expect("fixture writes");
-        let error = resolve_output(Some(path.to_string_lossy().to_string()))
+        let error = create_output(Some(path.to_string_lossy().to_string()), false)
             .expect_err("existing file is rejected");
         assert!(error.to_string().contains("Refusing to overwrite"));
+        std::fs::remove_file(&path).expect("fixture cleanup");
+    }
+
+    #[test]
+    fn force_overwrites_existing_file() {
+        let path = std::env::temp_dir().join("tbf-fix-force-test.m3u8");
+        std::fs::write(&path, "data").expect("fixture writes");
+        create_output(Some(path.to_string_lossy().to_string()), true).expect("force overwrites");
         std::fs::remove_file(&path).expect("fixture cleanup");
     }
 }

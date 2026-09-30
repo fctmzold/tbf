@@ -33,14 +33,6 @@ pub fn parse_timestamp(stamp: &str) -> Result<i64, AppError> {
         return Ok(datetime.timestamp());
     }
 
-    // Twitch timestamps use a `Z` suffix instead of `+00:00`.
-    if let Some(utc) = stamp.strip_suffix('Z') {
-        let normalized = format!("{utc}+00:00");
-        if let Ok(datetime) = DateTime::parse_from_rfc3339(&normalized) {
-            return Ok(datetime.timestamp());
-        }
-    }
-
     if let Ok(naive) = NaiveDateTime::parse_from_str(stamp, "%Y-%m-%d %H:%M:%S") {
         return Ok(naive.and_utc().timestamp());
     }

@@ -3,7 +3,7 @@ use futures::stream::{self, StreamExt};
 use reqwest::Client;
 
 use crate::cli::Cli;
-use crate::progress::scanning_progress;
+use crate::progress::{emit, scanning_progress};
 use crate::twitch::cdns::DEFAULT_CDNS;
 use crate::twitch::check;
 use crate::util::parse_timestamp;
@@ -79,14 +79,20 @@ pub async fn execute(client: &Client, target: BruteforceTarget<'_>, flags: &Cli)
         .buffer_unordered(usize::from(flags.threads))
         .fold(
             (0_u64, 0_u64),
-            |(found, failed), (probe, timestamp, url, quality)| async move {
-                match probe {
-                    check::Probe::Hit => {
-                        println!("[{quality}] Timestamp {timestamp}: {url}");
-                        (found + 1, failed)
+            |(found, failed), (probe, timestamp, url, quality)| {
+                let progress = progress.clone();
+                async move {
+                    match probe {
+                        check::Probe::Hit => {
+                            emit(
+                                progress.as_ref(),
+                                format!("[{quality}] Timestamp {timestamp}: {url}"),
+                            );
+                            (found + 1, failed)
+                        }
+                        check::Probe::Miss => (found, failed),
+                        check::Probe::Failed => (found, failed + 1),
                     }
-                    check::Probe::Miss => (found, failed),
-                    check::Probe::Failed => (found, failed + 1),
                 }
             },
         )

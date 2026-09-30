@@ -1,0 +1,50 @@
+{
+  "languages": {
+    "Rust": {
+      "tab_size": 4,
+      "hard_tabs": false,
+      "preferred_line_length": 100,
+      "format_on_save": "on",
+      "formatter": "language_server",
+      "code_actions_on_format": {
+        "source.fixAll": true
+      }
+    }
+  },
+  "lsp": {
+    "rust-analyzer": {
+      "initialization_options": {
+        "cargo": {
+          "allTargets": true
+        },
+        "check": {
+          "command": "clippy",
+          "extraArgs": ["--", "-D", "warnings"]
+        },
+        "procMacro": {
+          "enable": true
+        },
+        "diagnostics": {
+          "enable": true,
+          "experimental": {
+            "enable": true
+          }
+        },
+        "inlayHints": {
+          "maxLength": 25,
+          "lifetimeElisionHints": {
+            "enable": "skip_trivial",
+            "useParameterNames": true
+          },
+          "closureReturnTypeHints": {
+            "enable": "always"
+          }
+        }
+      }
+    }
+  },
+  "ensure_final_newline_on_save": true,
+  "remove_trailing_whitespace_on_save": true,
+  "show_whitespaces": "selection",
+  "enable_language_server": true
+}

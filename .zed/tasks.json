@@ -1,0 +1,42 @@
+[
+  {
+    "label": "cargo check",
+    "command": "cargo",
+    "args": ["check", "--workspace", "--all-targets"],
+    "tags": ["rust-check"]
+  },
+  {
+    "label": "cargo build",
+    "command": "cargo",
+    "args": ["build", "--workspace", "--all-targets"],
+    "tags": ["rust-build"]
+  },
+  {
+    "label": "cargo test",
+    "command": "cargo",
+    "args": ["test", "--workspace", "--all-targets"],
+    "tags": ["rust-test"]
+  },
+  {
+    "label": "cargo clippy strict",
+    "command": "cargo",
+    "args": ["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"],
+    "tags": ["rust-clippy"]
+  },
+  {
+    "label": "cargo fmt check",
+    "command": "cargo",
+    "args": ["fmt", "--all", "--check"]
+  },
+  {
+    "label": "cargo doc",
+    "command": "cargo",
+    "args": ["doc", "--workspace", "--no-deps"]
+  },
+  {
+    "label": "cargo run",
+    "command": "cargo",
+    "args": ["run"],
+    "tags": ["rust-run"]
+  }
+]

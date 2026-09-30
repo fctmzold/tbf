@@ -1,9 +1,9 @@
 use anyhow::{Context, Result};
 use futures::stream::{self, StreamExt};
-use indicatif::{ProgressBar, ProgressStyle};
 use reqwest::Client;
 
 use crate::cli::Cli;
+use crate::progress::scanning_progress;
 use crate::twitch::cdns::DEFAULT_CDNS;
 use crate::twitch::check;
 use crate::util::parse_timestamp;
@@ -22,6 +22,9 @@ pub struct BruteforceTarget<'a> {
 
 /// Scan a timestamp range for playable VOD playlists.
 ///
+/// Hits print as they arrive. Failed probes print as a warning; when every
+/// probe fails an error is returned instead of a misleading "not found".
+///
 /// # Arguments
 ///
 /// * `client` - Shared HTTP client.
@@ -30,8 +33,10 @@ pub struct BruteforceTarget<'a> {
 ///
 /// # Errors
 ///
-/// Returns an error when timestamps are invalid or the range is reversed.
+/// Returns an error when timestamps are invalid, the range is reversed, or
+/// all probes failed.
 pub async fn execute(client: &Client, target: BruteforceTarget<'_>, flags: &Cli) -> Result<()> {
+    let username = target.username.to_lowercase();
     let start = parse_timestamp(target.from).context("Invalid 'from' timestamp")?;
     let end = parse_timestamp(target.to).context("Invalid 'to' timestamp")?;
 
@@ -39,67 +44,68 @@ pub async fn execute(client: &Client, target: BruteforceTarget<'_>, flags: &Cli)
         anyhow::bail!("Start timestamp must be before end timestamp");
     }
 
-    let progress = if flags.progressbar {
-        let total =
-            (end - start + 1) as u64 * DEFAULT_CDNS.len() as u64 * check::QUALITIES.len() as u64;
-        let bar = ProgressBar::new(total);
-        let style = ProgressStyle::default_bar()
-            .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} {msg}")
-            .unwrap_or_else(|_| ProgressStyle::default_bar())
-            .progress_chars("##-");
-        bar.set_style(style);
-        bar.set_message("Searching for VOD playlist...");
-        Some(bar)
-    } else {
-        None
-    };
+    let total =
+        (end - start + 1) as u64 * DEFAULT_CDNS.len() as u64 * check::QUALITIES.len() as u64;
+    let progress = scanning_progress(
+        total,
+        "Searching for VOD playlist...",
+        flags.simple,
+        flags.progressbar,
+    );
 
     let candidates = (start..=end).flat_map(|timestamp| {
+        let stem = check::url_stem(&username, target.id, timestamp);
         DEFAULT_CDNS.iter().flat_map(move |cdn| {
+            let stem = stem.clone();
             check::QUALITIES.iter().map(move |quality| {
-                let url = check::playlist_url(cdn, target.username, target.id, timestamp, quality);
+                let url = check::playlist_url(cdn, &stem, quality);
                 (timestamp, url, (*quality).to_string())
             })
         })
     });
 
-    let found = stream::iter(candidates)
+    let (found, failed) = stream::iter(candidates)
         .map(|(timestamp, url, quality)| {
             let client = client.clone();
             let progress = progress.clone();
             async move {
-                let available = client
-                    .head(&url)
-                    .send()
-                    .await
-                    .map(|response| response.status().is_success())
-                    .unwrap_or(false);
-                if let Some(bar) = progress {
-                    if available {
-                        bar.set_message(format!("Found {quality} at timestamp {timestamp}"));
-                    } else {
-                        bar.inc(1);
-                    }
+                let probe = check::probe_head(&client, &url).await;
+                if let Some(bar) = &progress {
+                    bar.inc(1);
                 }
-                available.then_some((timestamp, url, quality))
+                (probe, timestamp, url, quality)
             }
         })
-        .buffer_unordered(flags.threads)
-        .filter_map(|item| async move { item })
-        .collect::<Vec<_>>()
+        .buffer_unordered(usize::from(flags.threads))
+        .fold(
+            (0_u64, 0_u64),
+            |(found, failed), (probe, timestamp, url, quality)| async move {
+                match probe {
+                    check::Probe::Hit => {
+                        println!("[{quality}] Timestamp {timestamp}: {url}");
+                        (found + 1, failed)
+                    }
+                    check::Probe::Miss => (found, failed),
+                    check::Probe::Failed => (found, failed + 1),
+                }
+            },
+        )
         .await;
 
     if let Some(bar) = progress {
         bar.finish_with_message("Search complete");
     }
 
-    if found.is_empty() {
+    if failed > 0 {
+        println!("Warning: {failed} of {total} probes failed; results may be incomplete.");
+    }
+    if found == 0 {
+        if failed == total {
+            anyhow::bail!("All {total} probes failed; check your connection and try again.");
+        }
         println!("Could not find any available VODs in the specified range.");
     } else {
-        println!("Found {} potential playlists:", found.len());
-        for (timestamp, url, quality) in found {
-            println!("[{quality}] Timestamp {timestamp}: {url}");
-        }
+        println!("Found {found} potential playlists.");
     }
 
     Ok(())

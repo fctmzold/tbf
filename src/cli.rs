@@ -9,15 +9,16 @@ pub struct Cli {
     pub command: Option<Commands>,
 
     /// Amount of concurrent requests to use for scanning operations.
-    #[arg(short, long, default_value_t = 100)]
-    pub threads: usize,
+    #[arg(short, long, default_value_t = 100, global = true,
+          value_parser = clap::value_parser!(u16).range(1..=1000))]
+    pub threads: u16,
 
     /// Provide minimal output.
-    #[arg(short, long)]
+    #[arg(short, long, global = true)]
     pub simple: bool,
 
     /// Enable a progress bar for long-running operations.
-    #[arg(short, long)]
+    #[arg(short, long, global = true)]
     pub progressbar: bool,
 }
 
@@ -70,4 +71,23 @@ pub enum Commands {
         /// Output file path. Defaults to fixed_playlist.m3u8.
         output: Option<String>,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn flags_work_after_subcommand() {
+        let cli = Cli::try_parse_from(["tbf", "exact", "-t", "50", "-s", "user", "1", "2"])
+            .expect("global flags parse after subcommand");
+        assert_eq!(cli.threads, 50);
+        assert!(cli.simple);
+    }
+
+    #[test]
+    fn zero_threads_is_rejected() {
+        assert!(Cli::try_parse_from(["tbf", "-t", "0", "live", "user"]).is_err());
+    }
 }

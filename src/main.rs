@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use anyhow::{Context, Result};
 use clap::Parser;
 use reqwest::Client;
@@ -13,6 +15,7 @@ async fn main() {
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
+        .with_writer(std::io::stderr)
         .init();
 
     if let Err(report) = run().await {
@@ -25,7 +28,13 @@ async fn main() {
 async fn run() -> Result<()> {
     let mut args = Cli::parse();
     let client = Client::builder()
-        .user_agent("tbf-new/0.1.0")
+        .user_agent(concat!(
+            env!("CARGO_PKG_NAME"),
+            "/",
+            env!("CARGO_PKG_VERSION")
+        ))
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(15))
         .build()
         .context("Failed to build HTTP client")?;
 

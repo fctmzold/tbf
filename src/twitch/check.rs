@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use futures::stream::{self, StreamExt};
 use reqwest::Client;
 use sha1::{Digest, Sha1};
@@ -22,6 +24,26 @@ pub struct VodInfo {
     pub playlist_url: String,
     /// Quality variant the playlist was found at.
     pub quality: String,
+}
+
+/// Outcome of a single HEAD probe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Probe {
+    /// The URL exists.
+    Hit,
+    /// The server answered but the URL is missing.
+    Miss,
+    /// No usable answer (timeout, DNS, or connection error).
+    Failed,
+}
+
+/// Result of scanning one timestamp across CDNs and qualities.
+#[derive(Debug)]
+pub struct ScanOutcome {
+    /// Playable playlists found, in CDN/quality order.
+    pub hits: Vec<VodInfo>,
+    /// Probes that failed without an answer.
+    pub failed: u64,
 }
 
 /// Generate the 20-character hash prefix for a VOD timestamp.
@@ -50,34 +72,97 @@ pub fn generate_hash(username: &str, vod_id: i64, timestamp: i64) -> String {
     format!("{digest:x}")[..20].to_string()
 }
 
+/// Build the shared `{hash}_{username}_{vod_id}_{timestamp}` URL stem.
+///
+/// Computing this once per timestamp avoids rehashing for every CDN and
+/// quality combination.
+///
+/// # Arguments
+///
+/// * `username` - Streamer login name.
+/// * `vod_id` - VOD/broadcast ID.
+/// * `timestamp` - Unix epoch seconds.
+///
+/// # Returns
+///
+/// URL stem without CDN host, quality, or filename.
+pub fn url_stem(username: &str, vod_id: i64, timestamp: i64) -> String {
+    let hash = generate_hash(username, vod_id, timestamp);
+    format!("{hash}_{username}_{vod_id}_{timestamp}")
+}
+
 /// Build the `index-dvr.m3u8` URL for one CDN and quality variant.
 ///
 /// # Arguments
 ///
 /// * `cdn` - CDN host serving the VOD.
-/// * `username` - Streamer login name.
-/// * `vod_id` - VOD/broadcast ID.
-/// * `timestamp` - Unix epoch seconds.
+/// * `stem` - URL stem from `url_stem`.
 /// * `quality` - Quality variant (see `QUALITIES`).
 ///
 /// # Returns
 ///
 /// Direct URL to the variant's `index-dvr.m3u8` playlist.
-pub fn playlist_url(
-    cdn: &str,
-    username: &str,
-    vod_id: i64,
-    timestamp: i64,
-    quality: &str,
-) -> String {
-    let hash = generate_hash(username, vod_id, timestamp);
-    format!("https://{cdn}/{hash}_{username}_{vod_id}_{timestamp}/{quality}/index-dvr.m3u8")
+pub fn playlist_url(cdn: &str, stem: &str, quality: &str) -> String {
+    format!("https://{cdn}/{stem}/{quality}/index-dvr.m3u8")
+}
+
+/// Number of HEAD probes per timestamp (CDNs times qualities).
+///
+/// # Returns
+///
+/// Total probe count for one `check_availability` call.
+pub fn probe_total() -> usize {
+    DEFAULT_CDNS.len() * QUALITIES.len()
+}
+
+/// Backoff between probe retries.
+fn backoff(attempt: u32) -> Duration {
+    Duration::from_millis(200 * 4_u64.pow(attempt))
+}
+
+/// HEAD a URL, retrying timeouts, 429s, and 5xx responses.
+///
+/// # Arguments
+///
+/// * `client` - Shared HTTP client.
+/// * `url` - URL to probe.
+///
+/// # Returns
+///
+/// `Hit` when the URL exists, `Miss` when the server says it does not,
+/// `Failed` when no usable answer arrived.
+pub async fn probe_head(client: &Client, url: &str) -> Probe {
+    const ATTEMPTS: u32 = 3;
+    for attempt in 0..ATTEMPTS {
+        let last = attempt + 1 == ATTEMPTS;
+        match client.head(url).send().await {
+            Ok(response) => {
+                let status = response.status();
+                if status.is_success() {
+                    return Probe::Hit;
+                }
+                if !last && (status.as_u16() == 429 || status.is_server_error()) {
+                    tokio::time::sleep(backoff(attempt)).await;
+                    continue;
+                }
+                return Probe::Miss;
+            }
+            Err(error) => {
+                if !last && error.is_timeout() {
+                    tokio::time::sleep(backoff(attempt)).await;
+                    continue;
+                }
+                return Probe::Failed;
+            }
+        }
+    }
+    Probe::Failed
 }
 
 /// Probe default CDNs for `index-dvr.m3u8` playlists at a timestamp.
 ///
 /// Checks every CDN and quality variant concurrently, then returns hits in
-/// CDN/quality order. Faster and more reliable than guessing filenames.
+/// CDN/quality order with a count of failed probes.
 ///
 /// # Arguments
 ///
@@ -89,67 +174,79 @@ pub fn playlist_url(
 ///
 /// # Returns
 ///
-/// Playable playlists found across CDNs and qualities.
-/// Empty when nothing is available.
+/// Hits and failed-probe count. Empty hits with zero failures means the VOD
+/// is not there; failures mean the answer is unreliable.
 pub async fn check_availability(
     client: &Client,
     username: &str,
     vod_id: i64,
     timestamp: i64,
     concurrency: usize,
-) -> Vec<VodInfo> {
+) -> ScanOutcome {
+    let stem = url_stem(username, vod_id, timestamp);
     let candidates: Vec<(usize, usize, String)> = DEFAULT_CDNS
         .iter()
         .enumerate()
         .flat_map(|(cdn_index, cdn)| {
+            let stem = stem.clone();
             QUALITIES
                 .iter()
                 .enumerate()
                 .map(move |(quality_index, quality)| {
-                    (
-                        cdn_index,
-                        quality_index,
-                        playlist_url(cdn, username, vod_id, timestamp, quality),
-                    )
+                    (cdn_index, quality_index, playlist_url(cdn, &stem, quality))
                 })
         })
         .collect();
 
-    let mut found: Vec<(usize, usize, VodInfo)> = stream::iter(candidates)
+    let probed: Vec<(usize, usize, Option<VodInfo>, bool)> = stream::iter(candidates)
         .map(|(cdn_index, quality_index, url)| {
             let client = client.clone();
             async move {
-                let available = client
-                    .head(&url)
-                    .send()
-                    .await
-                    .map(|response| response.status().is_success())
-                    .unwrap_or(false);
-                available.then(|| {
-                    let quality = QUALITIES[quality_index].to_string();
-                    (
-                        cdn_index,
-                        quality_index,
-                        VodInfo {
-                            playlist_url: url,
-                            quality,
-                        },
-                    )
-                })
+                match probe_head(&client, &url).await {
+                    Probe::Hit => {
+                        let quality = QUALITIES[quality_index].to_string();
+                        (
+                            cdn_index,
+                            quality_index,
+                            Some(VodInfo {
+                                playlist_url: url,
+                                quality,
+                            }),
+                            false,
+                        )
+                    }
+                    Probe::Miss => (cdn_index, quality_index, None, false),
+                    Probe::Failed => (cdn_index, quality_index, None, true),
+                }
             }
         })
         .buffer_unordered(concurrency.max(1))
-        .filter_map(|item| async move { item })
         .collect()
         .await;
 
-    found.sort_by_key(|(cdn_index, quality_index, _)| (*cdn_index, *quality_index));
-    found.into_iter().map(|(_, _, info)| info).collect()
+    let mut hits = Vec::new();
+    let mut failed = 0_u64;
+    for (cdn_index, quality_index, info, probe_failed) in probed {
+        if let Some(info) = info {
+            hits.push((cdn_index, quality_index, info));
+        }
+        if probe_failed {
+            failed += 1;
+        }
+    }
+
+    hits.sort_by_key(|(cdn_index, quality_index, _)| (*cdn_index, *quality_index));
+    ScanOutcome {
+        hits: hits.into_iter().map(|(_, _, info)| info).collect(),
+        failed,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
 
     #[test]
     fn hash_has_expected_length() {
@@ -184,17 +281,13 @@ mod tests {
 
     #[test]
     fn playlist_url_matches_known_vod() {
+        let stem = url_stem("arquel", 316_969_565_142, 1_790_752_835);
         assert_eq!(
-            playlist_url(
-                "dgeft87wbj63p.cloudfront.net",
-                "arquel",
-                316_969_565_142,
-                1_790_752_835,
-                "chunked"
-            ),
+            playlist_url("dgeft87wbj63p.cloudfront.net", &stem, "chunked"),
             "https://dgeft87wbj63p.cloudfront.net/5c20ac68ff0f9469ef5e_arquel_316969565142_1790752835/chunked/index-dvr.m3u8"
         );
     }
+
     #[test]
     fn qualities_list_is_not_empty() {
         assert!(!QUALITIES.is_empty());
@@ -208,5 +301,86 @@ mod tests {
         };
         assert_eq!(info.playlist_url, "https://example.com/index.m3u8");
         assert_eq!(info.quality, "chunked");
+    }
+
+    /// Serve canned HTTP statuses from a background thread.
+    fn serve(statuses: Vec<u16>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let addr = listener.local_addr().expect("read local addr");
+        std::thread::spawn(move || {
+            for status in statuses {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    break;
+                };
+                let mut request = [0_u8; 1024];
+                let _ = stream.read(&mut request);
+                let reason = match status {
+                    200 => "OK",
+                    404 => "Not Found",
+                    429 => "Too Many Requests",
+                    500 => "Internal Server Error",
+                    _ => "Error",
+                };
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 {status} {reason}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                );
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn existing_url_is_hit() {
+        let client = Client::new();
+        let base = serve(vec![200]);
+        assert_eq!(
+            probe_head(&client, &format!("{base}/x.m3u8")).await,
+            Probe::Hit
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_url_is_miss() {
+        let client = Client::new();
+        let base = serve(vec![404]);
+        assert_eq!(
+            probe_head(&client, &format!("{base}/x.m3u8")).await,
+            Probe::Miss
+        );
+    }
+
+    #[tokio::test]
+    async fn refused_connection_is_failed() {
+        let port = TcpListener::bind("127.0.0.1:0")
+            .expect("bind loopback")
+            .local_addr()
+            .expect("read local addr")
+            .port();
+        let client = Client::new();
+        assert_eq!(
+            probe_head(&client, &format!("http://127.0.0.1:{port}/x.m3u8")).await,
+            Probe::Failed
+        );
+    }
+
+    #[tokio::test]
+    async fn rate_limit_then_success_is_hit() {
+        let client = Client::new();
+        let base = serve(vec![429, 200]);
+        assert_eq!(
+            probe_head(&client, &format!("{base}/x.m3u8")).await,
+            Probe::Hit
+        );
+    }
+
+    #[tokio::test]
+    async fn persistent_server_error_is_miss() {
+        let client = Client::new();
+        let base = serve(vec![500, 500, 500]);
+        assert_eq!(
+            probe_head(&client, &format!("{base}/x.m3u8")).await,
+            Probe::Miss
+        );
     }
 }

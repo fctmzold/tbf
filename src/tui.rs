@@ -2,12 +2,11 @@ use std::cell::Cell;
 use std::io;
 
 use anyhow::Result;
-use crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+};
 use crossterm::event::{MouseButton, MouseEventKind};
 use crossterm::execute;
-use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
-};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -26,36 +25,38 @@ use ratatui::Terminal;
 ///
 /// Returns an error when terminal setup, drawing, or event reading fails.
 pub fn run() -> Result<Option<String>> {
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
+    // `init` installs a panic hook, so a panic cannot leave the terminal
+    // in raw mode or on the alternate screen.
+    let mut terminal = ratatui::init();
+    execute!(terminal.backend_mut(), EnableMouseCapture)?;
 
     let outcome = run_loop(&mut terminal);
 
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
-    terminal.show_cursor()?;
-
+    let _ = execute!(terminal.backend_mut(), DisableMouseCapture);
+    ratatui::restore();
     outcome
 }
 
-fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<Option<String>> {
-    const COMMANDS: [&str; 7] = [
-        "Exact - Check specific timestamp",
-        "Bruteforce - Search timestamp range",
-        "Clipforce - Scan for clips",
-        "Link - Extract from TwitchTracker",
-        "Live - Find currently live VOD",
-        "Fix - Fix unmuted playlist",
-        "Quit",
-    ];
+/// Menu labels shown in the picker; the last entry always quits.
+const COMMAND_LABELS: [&str; 7] = [
+    "Exact - Check specific timestamp",
+    "Bruteforce - Search timestamp range",
+    "Clipforce - Scan for clips",
+    "Link - Extract from TwitchTracker",
+    "Live - Find currently live VOD",
+    "Fix - Fix unmuted playlist",
+    "Quit",
+];
 
+/// Command keys returned by the picker, aligned with `COMMAND_LABELS`.
+const COMMAND_KEYS: [&str; 6] = ["exact", "bruteforce", "clipforce", "link", "live", "fix"];
+
+/// Map a menu index to its command key without parsing display text.
+fn command_key(selected: usize) -> String {
+    COMMAND_KEYS[selected].to_string()
+}
+
+fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<Option<String>> {
     let mut selected = 0_usize;
     let mut offset = 0_usize;
     // `Cell` shares the drawn list area with the mouse handler.
@@ -85,7 +86,7 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<Opt
                 );
             frame.render_widget(title, chunks[0]);
 
-            let items: Vec<ListItem> = COMMANDS
+            let items: Vec<ListItem> = COMMAND_LABELS
                 .iter()
                 .enumerate()
                 .map(|(index, command)| {
@@ -111,8 +112,10 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<Opt
             } else if selected >= offset + visible_height {
                 offset = selected - visible_height + 1;
             }
-            if offset + visible_height > COMMANDS.len() && COMMANDS.len() >= visible_height {
-                offset = COMMANDS.len() - visible_height;
+            if offset + visible_height > COMMAND_LABELS.len()
+                && COMMAND_LABELS.len() >= visible_height
+            {
+                offset = COMMAND_LABELS.len() - visible_height;
             }
 
             let end = (offset + visible_height).min(items.len());
@@ -126,44 +129,45 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<Opt
         })?;
 
         match event::read()? {
-            Event::Key(key) => match key.code {
-                KeyCode::Char('q') => return Ok(None),
-                KeyCode::Enter => {
-                    if selected == COMMANDS.len() - 1 {
+            Event::Key(key) if key.kind == KeyEventKind::Press => match (key.code, key.modifiers) {
+                (KeyCode::Char('c'), KeyModifiers::CONTROL)
+                | (KeyCode::Esc | KeyCode::Char('q'), _) => return Ok(None),
+                (KeyCode::Enter, _) => {
+                    if selected == COMMAND_LABELS.len() - 1 {
                         return Ok(None);
                     }
-                    let key = COMMANDS[selected]
-                        .split(" -")
-                        .next()
-                        .unwrap_or("")
-                        .to_lowercase();
-                    return Ok(Some(key));
+                    return Ok(Some(command_key(selected)));
                 }
-                KeyCode::Up => selected = selected.saturating_sub(1),
-                KeyCode::Down if selected + 1 < COMMANDS.len() => selected += 1,
-                KeyCode::Down => {}
+                (KeyCode::Up, _) => selected = selected.saturating_sub(1),
+                (KeyCode::Down, _) if selected + 1 < COMMAND_LABELS.len() => selected += 1,
                 _ => {}
             },
+            Event::Key(_) => {}
             Event::Mouse(mouse) => {
                 let list_area = list_area_cell.get();
-                let inside = mouse.column >= list_area.x
-                    && mouse.column < list_area.x + list_area.width
-                    && mouse.row >= list_area.y
-                    && mouse.row < list_area.y + list_area.height;
-                if inside {
+                let row = mouse.row.saturating_sub(list_area.y) as usize;
+                let height = list_area.height as usize;
+                let inside_rows = row > 0 && row + 1 < height;
+                let inside_columns =
+                    mouse.column > list_area.x && mouse.column + 1 < list_area.x + list_area.width;
+                if inside_rows && inside_columns {
                     match mouse.kind {
                         MouseEventKind::Down(MouseButton::Left) => {
-                            // Subtract borders (1) plus current scroll offset.
-                            let relative = (mouse.row - list_area.y).saturating_sub(1) as usize;
-                            let clicked = relative + offset;
-                            if clicked < COMMANDS.len() {
+                            let clicked = row - 1 + offset;
+                            if clicked < COMMAND_LABELS.len() {
+                                if clicked == selected {
+                                    if selected == COMMAND_LABELS.len() - 1 {
+                                        return Ok(None);
+                                    }
+                                    return Ok(Some(command_key(selected)));
+                                }
                                 selected = clicked;
                             }
                         }
                         MouseEventKind::ScrollUp => {
                             selected = selected.saturating_sub(1);
                         }
-                        MouseEventKind::ScrollDown if selected + 1 < COMMANDS.len() => {
+                        MouseEventKind::ScrollDown if selected + 1 < COMMAND_LABELS.len() => {
                             selected += 1;
                         }
                         MouseEventKind::ScrollDown => {}

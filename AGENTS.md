@@ -19,6 +19,8 @@ These are the rules most likely to be broken by well-meaning changes. Read them 
   `tracing`/`log`; the stdout/stderr split is the interface.
 - While an `indicatif` bar is active, print through `bar.println(..)` or `bar.suspend(..)`.
   Never use bare `println!`/`eprintln!`, which tears the bar.
+- Result blocks (anything a user would pipe) print via `stdout_line`; `note` is for stderr
+  diagnostics only.
 
 ### Exit codes
 
@@ -49,6 +51,8 @@ These are the rules most likely to be broken by well-meaning changes. Read them 
   range-limited integers). New numeric flags need an explicit range.
 - Any scan size is computed with `range_len` BEFORE iterating. Never `collect()` a user-sized
   range, and never compute `to - from + 1` in `i64`.
+- Any command whose request count depends on a user-supplied number (range, window) computes
+  an estimate first and refuses above `CONFIRM_THRESHOLD` unless confirmed.
 - Scans above `CONFIRM_THRESHOLD` need `--yes` on the CLI or a confirm prompt in interactive mode.
 
 ### Tests
@@ -153,6 +157,8 @@ pub fn range_len(from: i64, to: i64) -> u64 {
 - Add context with `.context()`. Error messages should say what failed and, where possible,
   what to do next.
 - Classify retryable failures with `Failure::{Transient, Permanent}`; do not retry permanent ones.
+- A 429 without `Retry-After` is `Failure::Transient` (backoff applies); only a served wait
+  is `Failure::RateLimited` (retry at once).
 
 ## Function and Type Design
 

@@ -22,6 +22,7 @@ struct GqlStreamVars {
 
 #[derive(Deserialize, Debug)]
 struct GqlStreamInfoResponse {
+    errors: Option<serde_json::Value>,
     data: Option<GqlStreamData>,
 }
 
@@ -60,6 +61,7 @@ fn extract_stream_info(response: GqlStreamInfoResponse) -> Result<Option<(u64, S
 
 #[derive(Deserialize, Debug)]
 struct GqlVodTokenResponse {
+    errors: Option<serde_json::Value>,
     data: Option<GqlVodTokenData>,
 }
 
@@ -73,6 +75,23 @@ struct GqlVodTokenData {
 struct GqlVodAccessToken {
     value: String,
     signature: String,
+}
+
+/// Reject a GraphQL response carrying an `errors` field.
+///
+/// Without this, an API change looks like "no stream" or "restricted
+/// video" instead of an error.
+///
+/// # Arguments
+///
+/// * `errors` - The response's `errors` field, if present.
+fn reject_api_errors(errors: Option<&serde_json::Value>) -> Result<()> {
+    if let Some(errors) = errors {
+        if !errors.is_null() {
+            anyhow::bail!("Twitch API returned errors: {errors}");
+        }
+    }
+    Ok(())
 }
 
 /// Fetch the VOD playback token and signature for one video.
@@ -124,6 +143,7 @@ pub async fn get_vod_token(client: &Client, vod_id: &str) -> Result<Option<(Stri
     .await
     .context("VOD token request failed")?;
 
+    reject_api_errors(parsed.errors.as_ref())?;
     Ok(extract_vod_token(parsed))
 }
 
@@ -186,6 +206,7 @@ pub async fn get_stream_info(client: &Client, username: &str) -> Result<Option<(
     .await
     .context("Stream info request failed")?;
 
+    reject_api_errors(parsed.errors.as_ref())?;
     extract_stream_info(parsed)
 }
 
@@ -229,6 +250,15 @@ mod tests {
             r#"{"data":{"user":{"stream":{"id":"not-a-number","createdAt":"2020-11-19T04:29:54Z"}}}}"#,
         );
         assert!(extract_stream_info(response).is_err());
+    }
+
+    #[test]
+    fn api_errors_are_not_mistaken_for_offline() {
+        let errors = serde_json::json!([{"message": "service timeout"}]);
+        let report = reject_api_errors(Some(&errors)).expect_err("errors fail");
+        assert!(report.to_string().contains("service timeout"));
+        assert!(reject_api_errors(None).is_ok());
+        assert!(reject_api_errors(Some(&serde_json::Value::Null)).is_ok());
     }
 
     #[test]

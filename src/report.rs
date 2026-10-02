@@ -4,6 +4,7 @@ use crate::twitch::check::VodInfo;
 ///
 /// `println!` panics on EPIPE, and with `panic = "abort"` that becomes
 /// SIGABRT — ugly for a pipe-oriented tool (`tbf vods foo | head -1`).
+/// Other write errors exit 2, keeping the exit-code contract.
 ///
 /// # Arguments
 ///
@@ -21,7 +22,8 @@ pub fn print_line(line: &str) {
         if error.kind() == std::io::ErrorKind::BrokenPipe {
             std::process::exit(0);
         }
-        panic!("failed writing to stdout: {error}");
+        eprintln!("error: failed writing to stdout: {error}");
+        std::process::exit(2);
     }
 }
 

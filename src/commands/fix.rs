@@ -177,6 +177,18 @@ pub async fn execute(
             failed += 1;
         }
     }
+
+    // An outage is an error, not a clean result: every probe failed.
+    if failed == candidate_count as u64 {
+        anyhow::bail!(
+            "All {candidate_count} muted-segment probes failed; check your connection and try again."
+        );
+    }
+    // Nothing to swap means nothing to write.
+    if swapped == 0 {
+        eprintln!("No muted alternatives found; leaving the playlist unchanged.");
+        return Ok(Outcome::NotFound);
+    }
     for (index, segment) in playlist.segments.iter_mut().enumerate() {
         segment.uri = replacements
             .remove(&index)
@@ -201,6 +213,7 @@ pub async fn execute(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::serve_fix_playlist;
 
     fn segment_url(raw: &str) -> Url {
         Url::parse(raw).expect("fixture URL parses")
@@ -264,52 +277,13 @@ mod tests {
         create_output(Some(path.to_string_lossy().to_string()), true).expect("force overwrites");
     }
 
-    /// Serve a playlist plus one muted segment from a background thread.
-    fn serve_fix_playlist() -> String {
-        use std::io::{Read, Write};
-        use std::net::TcpListener;
-
-        const PLAYLIST: &str = "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:6\n#EXTINF:6.0,\n1-unmuted.ts\n#EXT-X-ENDLIST\n";
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
-        let addr = listener.local_addr().expect("read local addr");
-        std::thread::spawn(move || {
-            // One playlist fetch plus one muted-segment probe.
-            for _ in 0..2 {
-                let Ok((mut stream, _)) = listener.accept() else {
-                    break;
-                };
-                let mut request = [0_u8; 1024];
-                let _ = stream.read(&mut request);
-                let head = String::from_utf8_lossy(&request);
-                let mut parts = head.split_whitespace();
-                let (method, path) = (
-                    parts.next().unwrap_or_default(),
-                    parts.next().unwrap_or_default(),
-                );
-                let (status, body) = if method == "GET" && path.ends_with(".m3u8") {
-                    ("200 OK", PLAYLIST)
-                } else if path.ends_with("1-muted.ts") {
-                    ("200 OK", "")
-                } else {
-                    ("404 Not Found", "")
-                };
-                let _ = write!(
-                    stream,
-                    "HTTP/1.1 {status}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-            }
-        });
-        format!("http://{addr}")
-    }
-
     fn test_opts() -> crate::cli::GlobalOpts {
         crate::cli::GlobalOpts::default()
     }
 
     #[tokio::test]
     async fn swaps_muted_segment_end_to_end() {
-        let base = serve_fix_playlist();
+        let base = serve_fix_playlist(200);
         let dir = tempfile::tempdir().expect("temp dir creates");
         let out = dir.path().join("fixed.m3u8");
         let client = reqwest::Client::new();
@@ -326,6 +300,46 @@ mod tests {
         let saved = std::fs::read_to_string(&out).expect("output written");
         assert!(saved.contains("1-muted.ts"), "muted segment swaps in");
         assert!(!saved.contains("1-unmuted.ts"), "unmuted segment swaps out");
+    }
+
+    #[tokio::test]
+    async fn all_probes_failed_is_an_error() {
+        let base = serve_fix_playlist(500);
+        let dir = tempfile::tempdir().expect("temp dir creates");
+        let out = dir.path().join("fixed.m3u8");
+        let client = reqwest::Client::new();
+        let error = super::execute(
+            &client,
+            &format!("{base}/vod.m3u8"),
+            Some(out.to_string_lossy().to_string()),
+            false,
+            &test_opts(),
+        )
+        .await
+        .expect_err("outage is an error");
+        assert!(error.to_string().contains("probes failed"));
+        assert!(!out.exists(), "no file on total failure");
+    }
+
+    #[tokio::test]
+    async fn nothing_to_swap_writes_nothing() {
+        let base = serve_fix_playlist(404);
+        let dir = tempfile::tempdir().expect("temp dir creates");
+        let out = dir.path().join("fixed.m3u8");
+        let client = reqwest::Client::new();
+        assert_eq!(
+            super::execute(
+                &client,
+                &format!("{base}/vod.m3u8"),
+                Some(out.to_string_lossy().to_string()),
+                false,
+                &test_opts(),
+            )
+            .await
+            .expect("miss runs cleanly"),
+            crate::commands::Outcome::NotFound
+        );
+        assert!(!out.exists(), "unchanged playlist is not written");
     }
 
     #[tokio::test]

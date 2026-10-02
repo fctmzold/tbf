@@ -4,6 +4,7 @@ use reqwest::Client;
 
 use crate::cli::GlobalOpts;
 use crate::commands::Outcome;
+use crate::commands::bruteforce::CONFIRM_THRESHOLD;
 use crate::progress::scanning_progress;
 use crate::report::{emit_hit, hint, note, suggest_player};
 use crate::twitch::check::{self, Prober};
@@ -51,6 +52,12 @@ pub async fn execute(
     );
 
     let prober = Prober::with_hosts(client.clone(), usize::from(opts.threads), opts.cdn_hosts());
+    // A wide window is a large scan in disguise: refuse above the same
+    // threshold bruteforce uses instead of probing for hours unasked.
+    let estimate = (2 * window + 1).saturating_mul(check::probe_total(&prober) as u64);
+    if estimate > CONFIRM_THRESHOLD {
+        anyhow::bail!("--window {window} implies about {estimate} requests; lower it.");
+    }
     let probe_each = check::probe_total(&prober) as u64;
     let tasks = usize::from(opts.threads).max(1);
     let mut results = stream::iter(offsets)
@@ -124,39 +131,7 @@ pub async fn execute(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::{Read, Write};
-    use std::net::TcpListener;
-
-    /// Serve 200 for playlist paths of `target`, 404 for everything else.
-    fn serve_gated(target: i64) -> String {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
-        let addr = listener.local_addr().expect("read local addr");
-        let marker = format!("_{target}/");
-        std::thread::spawn(move || {
-            for _ in 0..200 {
-                let Ok((mut stream, _)) = listener.accept() else {
-                    break;
-                };
-                let marker = marker.clone();
-                std::thread::spawn(move || {
-                    let mut request = [0_u8; 2048];
-                    let _ = stream.read(&mut request);
-                    let head = String::from_utf8_lossy(&request);
-                    let path = head.split_whitespace().nth(1).unwrap_or_default();
-                    let (status, reason) = if path.contains(&marker) {
-                        ("200", "OK")
-                    } else {
-                        ("404", "Not Found")
-                    };
-                    let _ = write!(
-                        stream,
-                        "HTTP/1.1 {status} {reason}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
-                    );
-                });
-            }
-        });
-        format!("http://{addr}")
-    }
+    use crate::testutil::serve_gated;
 
     fn test_opts(base: String) -> GlobalOpts {
         GlobalOpts {
@@ -192,5 +167,18 @@ mod tests {
                 .expect("lookup runs"),
             Outcome::NotFound
         );
+    }
+
+    #[tokio::test]
+    async fn huge_window_bails_before_probing() {
+        let client = Client::new();
+        let opts = GlobalOpts {
+            window: 3600,
+            ..GlobalOpts::default()
+        };
+        let error = super::execute(&client, "arquel", 1, 1_605_781_794, &opts)
+            .await
+            .expect_err("window guard bails");
+        assert!(error.to_string().contains("--window"));
     }
 }

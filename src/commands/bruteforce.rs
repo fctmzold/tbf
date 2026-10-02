@@ -110,6 +110,9 @@ pub async fn execute(
 
 /// Probe one timestamp, expanding to all qualities on a `chunked` hit.
 ///
+/// The expansion skips `chunked` (already probed) and prepends those hits,
+/// so no playlist is fetched twice.
+///
 /// # Arguments
 ///
 /// * `ctx` - Shared scan inputs.
@@ -119,28 +122,31 @@ pub async fn execute(
 ///
 /// Timestamp with its scan outcome and the number of probes it took.
 async fn probe_timestamp(ctx: &ScanCtx<'_>, timestamp: i64) -> (i64, ScanOutcome, u64) {
-    let chunked_each = ctx.prober.host_count() as u64;
+    let hosts = ctx.prober.host_count() as u64;
     let chunked =
         check::check_qualities(ctx.prober, ctx.username, ctx.id, timestamp, &["chunked"]).await;
     if chunked.hits.is_empty() {
         if let Some(bar) = &ctx.progress {
             bar.inc(1);
         }
-        return (timestamp, chunked, chunked_each);
+        return (timestamp, chunked, hosts);
     }
-    let full = check::check_availability(ctx.prober, ctx.username, ctx.id, timestamp).await;
-    let probes = chunked_each + check::probe_total(ctx.prober) as u64;
+    let rest = check::check_qualities(
+        ctx.prober,
+        ctx.username,
+        ctx.id,
+        timestamp,
+        &check::QUALITIES[1..],
+    )
+    .await;
+    let probes = hosts + hosts * check::QUALITIES.len().saturating_sub(1) as u64;
     if let Some(bar) = &ctx.progress {
         bar.inc(1);
     }
-    (
-        timestamp,
-        ScanOutcome {
-            failed: chunked.failed + full.failed,
-            hits: full.hits,
-        },
-        probes,
-    )
+    let mut hits = chunked.hits;
+    let failed = chunked.failed + rest.failed;
+    hits.extend(rest.hits);
+    (timestamp, ScanOutcome { hits, failed }, probes)
 }
 
 /// Scan in order, stopping at the first timestamp with a hit.
@@ -273,39 +279,7 @@ async fn scan_all(ctx: ScanCtx<'_>) -> Result<Outcome> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::{Read, Write};
-    use std::net::TcpListener;
-
-    /// Serve 200 for playlist paths of `target`, 404 for everything else.
-    fn serve_gated(target: i64) -> String {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
-        let addr = listener.local_addr().expect("read local addr");
-        let marker = format!("_{target}/");
-        std::thread::spawn(move || {
-            for _ in 0..400 {
-                let Ok((mut stream, _)) = listener.accept() else {
-                    break;
-                };
-                let marker = marker.clone();
-                std::thread::spawn(move || {
-                    let mut request = [0_u8; 2048];
-                    let _ = stream.read(&mut request);
-                    let head = String::from_utf8_lossy(&request);
-                    let path = head.split_whitespace().nth(1).unwrap_or_default();
-                    let (status, reason) = if path.contains(&marker) {
-                        ("200", "OK")
-                    } else {
-                        ("404", "Not Found")
-                    };
-                    let _ = write!(
-                        stream,
-                        "HTTP/1.1 {status} {reason}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
-                    );
-                });
-            }
-        });
-        format!("http://{addr}")
-    }
+    use crate::testutil::serve_gated;
 
     fn scan_ctx<'a>(
         prober: &'a Prober,

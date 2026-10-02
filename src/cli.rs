@@ -335,11 +335,24 @@ mod tests {
 
     #[test]
     fn resolve_hosts_parses_env_list() {
+        use crate::twitch::cdns::DEFAULT_CDNS;
         assert_eq!(
             resolve_hosts(&[], Some(" a.example.com,, b.example.com ")),
             ["a.example.com", "b.example.com"]
         );
-        assert!(resolve_hosts(&[], Some(",,")).len() >= 4);
-        assert!(resolve_hosts(&[], None).len() >= 4);
+        assert_eq!(resolve_hosts(&[], Some(",,")), resolve_hosts(&[], None));
+        assert_eq!(resolve_hosts(&[], None).len(), DEFAULT_CDNS.len());
+    }
+
+    #[test]
+    fn resolve_hosts_trims_trailing_slashes() {
+        assert_eq!(
+            resolve_hosts(&["cdn.example.com/".to_string()], None),
+            ["cdn.example.com"]
+        );
+        assert_eq!(
+            resolve_hosts(&[], Some("cdn.example.com/")),
+            ["cdn.example.com"]
+        );
     }
 }

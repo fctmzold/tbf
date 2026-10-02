@@ -6,13 +6,16 @@ use crate::error::AppError;
 /// almost certainly a typo like `YYYYMMDD`, which would otherwise parse as
 /// a 1970 epoch.
 const MIN_PLAUSIBLE_TIMESTAMP: i64 = 1_000_000_000;
+/// Largest plausible VOD timestamp (2100-01-01); larger values are typos or
+/// un-normalized sub-second units.
+const MAX_PLAUSIBLE_TIMESTAMP: i64 = 4_102_444_800;
 
 /// Parse a timestamp string into a Unix epoch.
 ///
-/// The integer's digit count decides its unit: 10 to 12 digits are seconds,
+/// The integer's digit count decides its unit: 10 digits are seconds,
 /// 13 are milliseconds, 16 are microseconds, and 19 are nanoseconds (common
-/// copy-paste slips), all divided down to seconds. Anything else, including
-/// implausibly small values like `YYYYMMDD`, is rejected.
+/// copy-paste slips), all divided down to seconds. Anything else, values
+/// below 2001, and values past 2100 are rejected as typos.
 ///
 /// # Arguments
 ///
@@ -41,13 +44,13 @@ pub fn parse_timestamp(stamp: &str) -> Result<i64, AppError> {
         // Digit count decides the unit; the sign is not a digit.
         let digits = stamp.trim_start_matches(['+', '-']).len();
         let seconds = match digits {
-            10..=12 => timestamp,
+            10 => timestamp,
             13 => timestamp / 1000,
             16 => timestamp / 1_000_000,
             19 => timestamp / 1_000_000_000,
             _ => return Err(AppError::InvalidTimestamp(stamp.to_string())),
         };
-        if seconds < MIN_PLAUSIBLE_TIMESTAMP {
+        if !(MIN_PLAUSIBLE_TIMESTAMP..=MAX_PLAUSIBLE_TIMESTAMP).contains(&seconds) {
             return Err(AppError::InvalidTimestamp(stamp.to_string()));
         }
         return Ok(seconds);
@@ -162,6 +165,11 @@ const RESERVED_LOGIN_PATHS: &[&str] = &[
     "settings",
     "subscriptions",
     "wallet",
+    "p",
+    "u",
+    "popout",
+    "prime",
+    "jobs",
 ];
 
 /// Parse a username argument at the CLI boundary.
@@ -291,6 +299,11 @@ mod tests {
     fn rejects_implausibly_small_timestamp() {
         assert!(parse_timestamp("20260930").is_err());
         assert!(parse_timestamp("0").is_err());
+    }
+
+    #[test]
+    fn rejects_far_future_timestamp() {
+        assert!(parse_timestamp("9999999999").is_err());
     }
 
     #[test]

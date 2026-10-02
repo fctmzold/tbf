@@ -193,6 +193,31 @@ fn ask_tracker_url() -> Result<String> {
     )
 }
 
+/// Ask whether a large scan may proceed.
+///
+/// Small scans pass silently; estimates above `CONFIRM_THRESHOLD` get a
+/// `Confirm` prompt defaulting to no.
+///
+/// # Arguments
+///
+/// * `estimate` - Approximate request count.
+///
+/// # Errors
+///
+/// Returns terminal errors, mapping Ctrl-C to a quiet [`QuietQuit`].
+fn confirm_large(estimate: u64) -> Result<bool> {
+    if estimate <= CONFIRM_THRESHOLD {
+        return Ok(true);
+    }
+    eprintln!("This scan implies about {estimate} requests.");
+    prompt(
+        Confirm::new()
+            .with_prompt("Proceed?")
+            .default(false)
+            .interact(),
+    )
+}
+
 /// Build the guided command for one menu pick.
 ///
 /// `None` returns to the menu (declined confirmation).
@@ -217,17 +242,7 @@ fn build_command(choice: Menu, opts: &GlobalOpts) -> Result<Option<crate::cli::C
             )?;
             let estimate =
                 range_len(from.min(to), from.max(to)).saturating_mul(opts.cdn_hosts().len() as u64);
-            let yes = if estimate > CONFIRM_THRESHOLD {
-                eprintln!("This scan implies about {estimate} requests.");
-                prompt(
-                    Confirm::new()
-                        .with_prompt("Proceed?")
-                        .default(false)
-                        .interact(),
-                )?
-            } else {
-                true
-            };
+            let yes = confirm_large(estimate)?;
             if !yes {
                 return Ok(None);
             }
@@ -245,17 +260,7 @@ fn build_command(choice: Menu, opts: &GlobalOpts) -> Result<Option<crate::cli::C
             let start = ask_offset("Start offset in seconds")?;
             let end = ask_offset("End offset in seconds")?;
             let estimate = range_len(start.min(end), start.max(end));
-            let yes = if estimate > CONFIRM_THRESHOLD {
-                eprintln!("This scan implies about {estimate} requests.");
-                prompt(
-                    Confirm::new()
-                        .with_prompt("Proceed?")
-                        .default(false)
-                        .interact(),
-                )?
-            } else {
-                true
-            };
+            let yes = confirm_large(estimate)?;
             if !yes {
                 return Ok(None);
             }

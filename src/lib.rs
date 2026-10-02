@@ -6,3 +6,6 @@ pub mod progress;
 pub mod report;
 pub mod twitch;
 pub mod util;
+
+#[cfg(test)]
+pub(crate) mod testutil;

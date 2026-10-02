@@ -44,8 +44,8 @@ pub fn classify_request(error: reqwest::Error) -> (Failure, anyhow::Error) {
 /// `Ok` for 2xx, retryable transient error for 429/5xx, permanent error
 /// otherwise.
 ///
-/// Note: 429s from `Prober` arrive as [`Failure::RateLimited`] instead,
-/// since the `Retry-After` wait is served before classifying.
+/// Note: `Prober::head_once` classifies its own 429s (see there), so this
+/// helper's 429 arm only serves non-prober callers.
 pub fn check_http_status(status: reqwest::StatusCode) -> Result<(), (Failure, anyhow::Error)> {
     if status.is_success() {
         Ok(())

@@ -117,9 +117,9 @@ pub async fn execute(
         // put offset 10 before offset 9, so sort by the number.
         found.sort_by_key(|(offset, _)| *offset);
         crate::report::note(progress.as_ref(), format!("Found {} clips:", found.len()));
-        for (_, url) in found {
+        for (offset, url) in found {
             if opts.json {
-                let entry = serde_json::json!({"clip_url": url});
+                let entry = serde_json::json!({"clip_url": url, "offset": offset});
                 crate::report::stdout_line(progress.as_ref(), &entry.to_string());
             } else {
                 crate::report::stdout_line(progress.as_ref(), &url);

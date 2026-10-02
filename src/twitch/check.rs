@@ -10,14 +10,6 @@ use tokio::sync::Semaphore;
 use crate::twitch::cdns::DEFAULT_CDNS;
 use crate::twitch::retry::{Failure, classify_request, retry_after_secs, with_retry};
 
-/// Wall-clock milliseconds since the Unix epoch.
-fn now_millis() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_millis() as u64)
-        .unwrap_or(0)
-}
-
 /// Quality variants probed directly via their `index-dvr.m3u8` playlists.
 pub const QUALITIES: &[&str] = &[
     "chunked",
@@ -30,7 +22,7 @@ pub const QUALITIES: &[&str] = &[
 ];
 
 /// A playable VOD playlist discovered on a CDN.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VodInfo {
     /// Direct URL to the `index-dvr.m3u8` playlist.
     pub playlist_url: String,
@@ -125,9 +117,6 @@ pub fn playlist_url(cdn: &str, stem: &str, quality: &str) -> String {
     }
 }
 
-/// Number of probed CDN hosts.
-pub const DEFAULT_CDN_COUNT: usize = DEFAULT_CDNS.len();
-
 /// HTTP prober bounding concurrent requests with a shared semaphore.
 ///
 /// Previously every scan layer took a `concurrency` number and nested them,
@@ -152,8 +141,12 @@ pub struct Prober {
     sem: Arc<Semaphore>,
     permits: usize,
     hosts: Vec<String>,
-    /// Shared unix-millis "not before" deadline after a 429.
+    /// Shared "not before" deadline as millis after `cooldown_base`.
     cooldown_until: Arc<AtomicU64>,
+    /// Base instant for the cooldown clock, set on first use so
+    /// construction works outside a runtime (doctests, plain tests).
+    /// Tokio time keeps it consistent with the sleeps under `pause()`.
+    cooldown_base: Arc<std::sync::OnceLock<tokio::time::Instant>>,
 }
 
 impl Prober {
@@ -203,6 +196,7 @@ impl Prober {
             permits,
             hosts,
             cooldown_until: Arc::new(AtomicU64::new(0)),
+            cooldown_base: Arc::new(std::sync::OnceLock::new()),
         }
     }
 
@@ -216,6 +210,24 @@ impl Prober {
         self.hosts.len()
     }
 
+    /// Milliseconds on the shared cooldown clock.
+    fn cooldown_now(&self) -> u64 {
+        self.cooldown_base
+            .get_or_init(tokio::time::Instant::now)
+            .elapsed()
+            .as_millis() as u64
+    }
+
+    /// Remaining shared 429 cooldown, or zero when clear.
+    fn cooldown_remaining(&self) -> Duration {
+        let remaining = self
+            .cooldown_until
+            .load(Ordering::Relaxed)
+            .saturating_sub(self.cooldown_now())
+            .min(60_000);
+        Duration::from_millis(remaining)
+    }
+
     /// Delay after a 429: pause this task and tell every sibling task to
     /// hold until the deadline, so the whole scan backs off together.
     ///
@@ -223,21 +235,31 @@ impl Prober {
     ///
     /// * `delay` - How long to wait; capped at one minute.
     async fn cool_down(&self, delay: Duration) {
-        let delay = delay.min(Duration::from_secs(60));
-        let until = now_millis().saturating_add(delay.as_millis() as u64);
-        self.cooldown_until.fetch_max(until, Ordering::Relaxed);
-        tokio::time::sleep(delay).await;
+        self.arm_cooldown(delay);
+        tokio::time::sleep(delay.min(Duration::from_secs(60))).await;
     }
 
-    /// Wait out a shared 429 cooldown before the next attempt.
+    /// Arm the shared 429 cooldown without sleeping.
+    ///
+    /// Lets one task's `Retry-After` (or fallback delay) gate every sibling
+    /// task through [`Prober::wait_for_cooldown`].
+    ///
+    /// # Arguments
+    ///
+    /// * `delay` - Hold duration; capped at one minute.
+    fn arm_cooldown(&self, delay: Duration) {
+        let delay = delay.min(Duration::from_secs(60));
+        let until = self.cooldown_now().saturating_add(delay.as_millis() as u64);
+        self.cooldown_until.fetch_max(until, Ordering::Relaxed);
+    }
+
+    /// Wait out a shared 429 cooldown before the next attempt, plus a few
+    /// milliseconds of jitter so woken tasks do not stampede together.
     async fn wait_for_cooldown(&self) {
-        let remaining = self
-            .cooldown_until
-            .load(Ordering::Relaxed)
-            .saturating_sub(now_millis())
-            .min(60_000);
-        if remaining > 0 {
-            tokio::time::sleep(Duration::from_millis(remaining)).await;
+        let remaining = self.cooldown_remaining();
+        if !remaining.is_zero() {
+            let jitter = Duration::from_millis(fastrand::u64(0..=50));
+            tokio::time::sleep(remaining + jitter).await;
         }
     }
 
@@ -265,16 +287,23 @@ impl Prober {
     /// One HEAD attempt with error classification for retries.
     ///
     /// The semaphore permit is released before any `Retry-After` sleep, so
-    /// a burst of 429s cannot stall the whole request budget.
+    /// a burst of 429s cannot stall the whole request budget. The cooldown
+    /// is re-checked after acquiring, since queued tasks may have passed
+    /// the first check before the 429 landed.
     async fn head_once(&self, url: &str) -> Result<Probe, (Failure, anyhow::Error)> {
-        self.wait_for_cooldown().await;
-        let response = {
-            let _permit = self
+        let response = loop {
+            let permit = self
                 .sem
                 .acquire()
                 .await
                 .map_err(|_| (Failure::Permanent, anyhow::anyhow!("prober shut down")))?;
-            self.client.head(url).send().await
+            if self.cooldown_remaining().is_zero() {
+                let response = self.client.head(url).send().await;
+                drop(permit);
+                break response;
+            }
+            drop(permit);
+            self.wait_for_cooldown().await;
         };
         match response {
             Ok(response) => {
@@ -282,13 +311,23 @@ impl Prober {
                 if status.is_success() {
                     Ok(Probe::Hit)
                 } else if status.as_u16() == 429 {
-                    if let Some(seconds) = retry_after_secs(&response) {
-                        self.cool_down(Duration::from_secs(seconds)).await;
+                    // 429 handling splits here, not in `check_http_status`:
+                    // a served `Retry-After` wait is `RateLimited` (retry at
+                    // once), a bare 429 is `Transient` (backoff applies).
+                    // Either way the shared cooldown gates the whole scan.
+                    let error = anyhow::anyhow!("HEAD {url} answered {status}");
+                    match retry_after_secs(&response) {
+                        Some(seconds) => {
+                            self.cool_down(Duration::from_secs(seconds)).await;
+                            Err((Failure::RateLimited, error))
+                        }
+                        // No header: arm a short shared hold, then back off
+                        // normally for this task.
+                        None => {
+                            self.arm_cooldown(Duration::from_millis(500));
+                            Err((Failure::Transient, error))
+                        }
                     }
-                    Err((
-                        Failure::RateLimited,
-                        anyhow::anyhow!("HEAD {url} answered {status}"),
-                    ))
                 } else if status.is_server_error() {
                     Err((
                         Failure::Transient,
@@ -428,6 +467,7 @@ pub async fn check_qualities(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::serve;
     use std::io::{Read, Write};
     use std::net::TcpListener;
 
@@ -484,33 +524,6 @@ mod tests {
         };
         assert_eq!(info.playlist_url, "https://example.com/index.m3u8");
         assert_eq!(info.quality, "chunked");
-    }
-
-    /// Serve canned HTTP statuses from a background thread.
-    fn serve(statuses: Vec<u16>) -> String {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
-        let addr = listener.local_addr().expect("read local addr");
-        std::thread::spawn(move || {
-            for status in statuses {
-                let Ok((mut stream, _)) = listener.accept() else {
-                    break;
-                };
-                let mut request = [0_u8; 1024];
-                let _ = stream.read(&mut request);
-                let reason = match status {
-                    200 => "OK",
-                    404 => "Not Found",
-                    429 => "Too Many Requests",
-                    500 => "Internal Server Error",
-                    _ => "Error",
-                };
-                let _ = write!(
-                    stream,
-                    "HTTP/1.1 {status} {reason}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
-                );
-            }
-        });
-        format!("http://{addr}")
     }
 
     #[tokio::test]
@@ -570,6 +583,128 @@ mod tests {
         assert_eq!(
             run_paused(async move { prober.probe_head(&format!("{base}/x.m3u8")).await }).await,
             Probe::Hit
+        );
+    }
+
+    /// Serve a 429 carrying `retry-after: 1`, then 200.
+    fn serve_rate_limited() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let addr = listener.local_addr().expect("read local addr");
+        std::thread::spawn(move || {
+            for retry_after in [true, false] {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    break;
+                };
+                let mut request = [0_u8; 1024];
+                let _ = stream.read(&mut request);
+                let header = if retry_after {
+                    "retry-after: 1\r\n"
+                } else {
+                    ""
+                };
+                let (status, reason) = if retry_after {
+                    ("429", "Too Many Requests")
+                } else {
+                    ("200", "OK")
+                };
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 {status} {reason}\r\n{header}content-length: 0\r\nconnection: close\r\n\r\n"
+                );
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn rate_limit_with_retry_after_sets_cooldown() {
+        let prober = Prober::new(Client::new(), 8);
+        let task = prober.clone();
+        let base = serve_rate_limited();
+        assert_eq!(
+            run_paused(async move { task.probe_head(&format!("{base}/x.m3u8")).await }).await,
+            Probe::Hit
+        );
+        assert!(
+            prober.cooldown_until.load(Ordering::Relaxed) > 0,
+            "served wait arms the shared cooldown"
+        );
+    }
+
+    #[tokio::test]
+    async fn bare_429_arms_cooldown() {
+        let prober = Prober::new(Client::new(), 8);
+        let task = prober.clone();
+        let base = serve(vec![429, 429, 429]);
+        assert_eq!(
+            run_paused(async move { task.probe_head(&format!("{base}/x.m3u8")).await }).await,
+            Probe::Failed
+        );
+        assert!(
+            prober.cooldown_until.load(Ordering::Relaxed) > 0,
+            "header-less 429 arms the shared cooldown"
+        );
+    }
+
+    /// Serve one 429 with `retry-after: 1`, then 200 for every connection.
+    fn serve_gated_429() -> String {
+        use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let addr = listener.local_addr().expect("read local addr");
+        let first = std::sync::Arc::new(AtomicBool::new(true));
+        std::thread::spawn(move || {
+            loop {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    break;
+                };
+                let first = first.clone();
+                std::thread::spawn(move || {
+                    let mut request = [0_u8; 1024];
+                    let _ = stream.read(&mut request);
+                    let limited = first.swap(false, AtomicOrdering::SeqCst);
+                    let (status, header) = if limited {
+                        ("429 Too Many Requests", "retry-after: 1\r\n")
+                    } else {
+                        ("200 OK", "")
+                    };
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 {status}\r\n{header}content-length: 0\r\nconnection: close\r\n\r\n"
+                    );
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn cooldown_gates_concurrent_probe() {
+        tokio::time::pause();
+        let prober = Prober::new(Client::new(), 8);
+        let base = serve_gated_429();
+        let first = prober.clone();
+        let first_url = format!("{base}/first.m3u8");
+        let _first = tokio::spawn(async move { first.probe_head(&first_url).await });
+        // Let the 429 land and arm the shared cooldown.
+        for _ in 0..1000 {
+            if prober.cooldown_until.load(Ordering::Relaxed) > 0 {
+                break;
+            }
+            tokio::time::advance(Duration::from_millis(10)).await;
+        }
+        assert!(
+            prober.cooldown_until.load(Ordering::Relaxed) > 0,
+            "429 arms the shared cooldown"
+        );
+        let start = tokio::time::Instant::now();
+        let second = prober.clone();
+        let second_url = format!("{base}/second.m3u8");
+        let gated = tokio::spawn(async move { second.probe_head(&second_url).await });
+        tokio::time::advance(Duration::from_secs(120)).await;
+        assert_eq!(gated.await.expect("gated probe completes"), Probe::Hit);
+        assert!(
+            start.elapsed() >= Duration::from_secs(1),
+            "concurrent probe waited out the cooldown"
         );
     }
 

@@ -4,7 +4,7 @@ use reqwest::Client;
 
 use crate::cli::{GlobalOpts, VideoType};
 use crate::commands::Outcome;
-use crate::progress::{emit, scanning_progress};
+use crate::progress::scanning_progress;
 use crate::twitch::retry::{check_http_status, classify_request, with_retry};
 use crate::twitch::usher::Variant;
 use crate::twitch::videos::Video;
@@ -184,7 +184,7 @@ pub async fn execute(
                 for variant in &variants {
                     message.push_str(&format!("\n  [{}] {}", variant.label, variant.url));
                 }
-                emit(progress.as_ref(), message);
+                crate::report::stdout_line(progress.as_ref(), &message);
             }
             Ok(None) => {
                 if opts.json {
@@ -193,9 +193,9 @@ pub async fn execute(
                         &video_json(&video, &[]).to_string(),
                     );
                 } else if !urls_only {
-                    emit(
+                    crate::report::stdout_line(
                         progress.as_ref(),
-                        format!(
+                        &format!(
                             "{}\n  Link: {}\n  No playable playlist found.",
                             video.summary(),
                             video.url()
@@ -212,7 +212,7 @@ pub async fn execute(
                             .to_string(),
                     );
                 } else if !urls_only {
-                    emit(
+                    crate::report::note(
                         progress.as_ref(),
                         format!("{}\n  Lookup failed: {error:#}", video.summary()),
                     );

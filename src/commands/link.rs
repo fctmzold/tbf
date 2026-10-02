@@ -2,8 +2,8 @@ use anyhow::{Context, Result};
 use reqwest::Client;
 use scraper::{Html, Selector};
 
-use crate::cli::Cli;
-use crate::commands::exact;
+use crate::cli::GlobalOpts;
+use crate::commands::{Outcome, exact};
 use crate::twitch::retry::{check_http_status, classify_request, with_retry};
 use crate::util::parse_timestamp;
 
@@ -27,7 +27,7 @@ use crate::util::parse_timestamp;
 ///
 /// Returns an error for unparsable URLs, unsupported hosts or paths, and
 /// non-numeric IDs.
-pub(crate) fn parse_tracker_target(page_url: &str) -> Result<(String, i64)> {
+pub(crate) fn parse_tracker_target(page_url: &str) -> Result<(String, u64)> {
     let parsed = url::Url::parse(page_url).context("Invalid URL")?;
     let host = parsed
         .host_str()
@@ -43,7 +43,7 @@ pub(crate) fn parse_tracker_target(page_url: &str) -> Result<(String, i64)> {
         _ => anyhow::bail!("Unsupported tracker URL: expected a StreamsCharts stream page"),
     };
     let id = id_text
-        .parse::<i64>()
+        .parse::<u64>()
         .context("Invalid VOD ID in tracker URL")?;
     Ok((username.to_lowercase(), id))
 }
@@ -54,12 +54,12 @@ pub(crate) fn parse_tracker_target(page_url: &str) -> Result<(String, i64)> {
 ///
 /// * `client` - Shared HTTP client.
 /// * `url` - StreamsCharts stream page URL.
-/// * `flags` - Global CLI flags.
+/// * `opts` - Global CLI options.
 ///
 /// # Errors
 ///
 /// Returns an error when fetching, parsing, or the follow-up lookup fails.
-pub async fn execute(client: &Client, url: &str, flags: &Cli) -> Result<()> {
+pub async fn execute(client: &Client, url: &str, opts: &GlobalOpts) -> Result<Outcome> {
     let target = parse_tracker_target(url)?;
     let (username, id) = target;
     eprintln!("Detected Username: {username}, ID: {id}");
@@ -105,12 +105,31 @@ pub async fn execute(client: &Client, url: &str, flags: &Cli) -> Result<()> {
     }
 
     if timestamps.is_empty() {
-        let time_selector = Selector::parse("time").expect("static selector is valid");
+        // Scoped to article/main so a footer or "last updated" stamp is not
+        // mistaken for the stream start.
+        let time_selector = Selector::parse("article time[datetime], main time[datetime]")
+            .expect("static selector is valid");
         for element in document.select(&time_selector) {
             if let Some(datetime) = element.value().attr("datetime") {
                 timestamps.push(datetime.to_string());
                 break;
             }
+        }
+    }
+
+    if timestamps.is_empty() {
+        let time_selector = Selector::parse("time[datetime]").expect("static selector is valid");
+        for element in document.select(&time_selector) {
+            if let Some(datetime) = element.value().attr("datetime") {
+                timestamps.push(datetime.to_string());
+                break;
+            }
+        }
+        if !timestamps.is_empty() {
+            eprintln!(
+                "Warning: fell back to the first <time> on the page; it may be unrelated. \
+                 Verify the result, or run `bruteforce` around it."
+            );
         }
     }
 
@@ -121,7 +140,7 @@ pub async fn execute(client: &Client, url: &str, flags: &Cli) -> Result<()> {
     eprintln!("Extracted timestamps: {timestamps:?}");
     eprintln!("Running Exact search around the extracted timestamp...");
     let start = parse_timestamp(&timestamps[0]).context("Failed to parse extracted timestamp")?;
-    exact::execute(client, &username, id, start, flags).await
+    exact::execute(client, &username, id, start, opts).await
 }
 
 #[cfg(test)]

@@ -1,7 +1,9 @@
 [package]
 name = "tbf-new"
 version = "0.15.0"
-edition = "2021"
+edition = "2024"
+rust-version = "1.85"
+description = "Find hidden Twitch VOD playlists by timestamp hash probing"
 
 [dependencies]
 anyhow = "1.0"
@@ -10,6 +12,7 @@ clap = { version = "4.5", features = ["derive"] }
 console = "0.15"
 dialoguer = "0.11"
 futures = "0.3"
+fastrand = "2"
 indicatif = "0.17"
 m3u8-rs = "6.0"
 reqwest = { version = "0.12", features = ["json"] }
@@ -17,9 +20,13 @@ scraper = "0.21"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha1 = "0.10"
-thiserror = "1.0"
-tokio = { version = "1.38", features = ["macros", "rt-multi-thread", "time"] }
+thiserror = "2"
+tokio = { version = "1.38", features = ["macros", "rt-multi-thread", "time", "sync"] }
 url = "2.5"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1.38", features = ["test-util"] }
 
 [profile.dev]
 debug = "line-tables-only"
@@ -28,3 +35,9 @@ incremental = true
 [profile.test]
 debug = "line-tables-only"
 incremental = true
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = true
+panic = "abort"

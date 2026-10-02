@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
 use reqwest::Client;
 
-use crate::cli::Cli;
-use crate::commands::exact;
+use crate::cli::GlobalOpts;
+use crate::commands::{Outcome, exact};
 use crate::report::hint;
 use crate::twitch::gql;
 use crate::util::parse_timestamp;
@@ -13,12 +13,12 @@ use crate::util::parse_timestamp;
 ///
 /// * `client` - Shared HTTP client.
 /// * `username` - Streamer login name.
-/// * `flags` - Global CLI flags forwarded to the exact lookup.
+/// * `opts` - Global CLI options forwarded to the exact lookup.
 ///
 /// # Errors
 ///
 /// Returns an error when the metadata lookup or the DVR search fails.
-pub async fn execute(client: &Client, username: &str, flags: &Cli) -> Result<()> {
+pub async fn execute(client: &Client, username: &str, opts: &GlobalOpts) -> Result<Outcome> {
     let username = username.to_lowercase();
     eprintln!("Fetching live stream metadata for '{username}'...");
 
@@ -29,12 +29,12 @@ pub async fn execute(client: &Client, username: &str, flags: &Cli) -> Result<()>
             eprintln!("Stream Started At: {created_at}");
             eprintln!("Searching for the hidden DVR/VOD playlist...");
             let timestamp = parse_timestamp(&created_at).context("Failed to parse stream start")?;
-            exact::execute(client, &username, broadcast_id, timestamp, flags).await
+            exact::execute(client, &username, broadcast_id, timestamp, opts).await
         }
         None => {
             eprintln!("User '{username}' is not currently live or the channel does not exist.");
             hint("list past broadcasts with `vods <username>`");
-            Ok(())
+            Ok(Outcome::NotFound)
         }
     }
 }

@@ -2,21 +2,22 @@ use anyhow::Result;
 use futures::stream::{self, StreamExt};
 use reqwest::Client;
 
-use crate::cli::Cli;
+use crate::cli::GlobalOpts;
+use crate::commands::Outcome;
 use crate::progress::scanning_progress;
-use crate::report::{emit_hit, hint, suggest_player};
-use crate::twitch::check::{self, ScanOutcome};
-use crate::util::format_utc;
+use crate::report::{emit_hit, hint, note, suggest_player};
+use crate::twitch::check::{self, Prober, ScanOutcome};
+use crate::util::{format_utc, range_len};
 
 /// Request estimate above which confirmation is required.
-const CONFIRM_THRESHOLD: u64 = 20_000;
+pub(crate) const CONFIRM_THRESHOLD: u64 = 20_000;
 
 /// Inputs for a bruteforce scan.
 pub struct BruteforceTarget<'a> {
     /// Streamer login name.
     pub username: &'a str,
     /// VOD/broadcast ID.
-    pub id: i64,
+    pub id: u64,
     /// Range start as Unix epoch seconds.
     pub from: i64,
     /// Range end as Unix epoch seconds.
@@ -25,6 +26,24 @@ pub struct BruteforceTarget<'a> {
     pub all: bool,
     /// Skip the large-range confirmation.
     pub yes: bool,
+}
+
+/// Shared inputs for the first-hit and full-range scans.
+struct ScanCtx<'a> {
+    /// Prober bounding concurrent requests.
+    prober: &'a Prober,
+    /// Streamer login name.
+    username: &'a str,
+    /// VOD/broadcast ID.
+    id: u64,
+    /// Range start as Unix epoch seconds.
+    from: i64,
+    /// Range end as Unix epoch seconds.
+    to: i64,
+    /// Progress bar, if output is interactive.
+    progress: Option<indicatif::ProgressBar>,
+    /// Global CLI options controlling output and concurrency.
+    opts: &'a GlobalOpts,
 }
 
 /// Scan a timestamp range for playable VOD playlists.
@@ -36,176 +55,315 @@ pub struct BruteforceTarget<'a> {
 ///
 /// * `client` - Shared HTTP client.
 /// * `target` - Username, VOD ID, range bounds, and scan options.
-/// * `flags` - Global CLI flags controlling concurrency and progress output.
+/// * `opts` - Global CLI options controlling concurrency and output.
 ///
 /// # Errors
 ///
 /// Returns an error when the range is reversed, confirmation is missing
 /// for a huge range, or all probes failed.
-pub async fn execute(client: &Client, target: BruteforceTarget<'_>, flags: &Cli) -> Result<()> {
+pub async fn execute(
+    client: &Client,
+    target: BruteforceTarget<'_>,
+    opts: &GlobalOpts,
+) -> Result<Outcome> {
     let username = target.username.to_lowercase();
     if target.from > target.to {
         anyhow::bail!("Start timestamp must be before end timestamp");
     }
 
-    let timestamps: Vec<i64> = (target.from..=target.to).collect();
-    let estimate = timestamps.len() as u64 * check::DEFAULT_CDN_COUNT as u64;
+    // Count before iterating: collecting the range first would allocate
+    // gigabytes for a typo'd bound before the guard below can refuse it.
+    let prober = Prober::with_hosts(client.clone(), usize::from(opts.threads), opts.cdn_hosts());
+    let count = range_len(target.from, target.to);
+    let estimate = count.saturating_mul(prober.host_count() as u64);
     if !target.yes && estimate > CONFIRM_THRESHOLD {
         anyhow::bail!("This scan implies about {estimate} requests. Rerun with --yes to proceed.");
     }
 
     eprintln!(
-        "Scanning {} timestamps ({} to {}, chunked first)...",
-        timestamps.len(),
+        "Scanning {count} timestamps ({} to {}, chunked first)...",
         format_utc(target.from),
         format_utc(target.to)
     );
     let progress = scanning_progress(
-        timestamps.len() as u64,
+        count,
         "Scanning timestamps...",
-        flags.simple,
-        flags.progressbar,
+        opts.simple,
+        opts.progressbar,
     );
-    let threads = usize::from(flags.threads);
+    let ctx = ScanCtx {
+        prober: &prober,
+        username: &username,
+        id: target.id,
+        from: target.from,
+        to: target.to,
+        progress,
+        opts,
+    };
 
     if target.all {
-        scan_all(
-            client, &username, target.id, timestamps, threads, progress, flags,
-        )
-        .await
+        scan_all(ctx).await
     } else {
-        scan_first(
-            client, &username, target.id, timestamps, threads, progress, flags,
-        )
-        .await
+        scan_first(ctx).await
     }
 }
 
-/// Scan in order, stopping at the first timestamp with a hit.
-async fn scan_first(
-    client: &Client,
-    username: &str,
-    id: i64,
-    timestamps: Vec<i64>,
-    threads: usize,
-    progress: Option<indicatif::ProgressBar>,
-    flags: &Cli,
-) -> Result<()> {
-    let mut failed_total = 0_u64;
-    for timestamp in timestamps {
-        let outcome =
-            check::check_qualities(client, username, id, timestamp, &["chunked"], threads).await;
-        failed_total += outcome.failed;
-        if let Some(bar) = &progress {
+/// Probe one timestamp, expanding to all qualities on a `chunked` hit.
+///
+/// # Arguments
+///
+/// * `ctx` - Shared scan inputs.
+/// * `timestamp` - Unix epoch seconds to probe.
+///
+/// # Returns
+///
+/// Timestamp with its scan outcome and the number of probes it took.
+async fn probe_timestamp(ctx: &ScanCtx<'_>, timestamp: i64) -> (i64, ScanOutcome, u64) {
+    let chunked_each = ctx.prober.host_count() as u64;
+    let chunked =
+        check::check_qualities(ctx.prober, ctx.username, ctx.id, timestamp, &["chunked"]).await;
+    if chunked.hits.is_empty() {
+        if let Some(bar) = &ctx.progress {
             bar.inc(1);
         }
+        return (timestamp, chunked, chunked_each);
+    }
+    let full = check::check_availability(ctx.prober, ctx.username, ctx.id, timestamp).await;
+    let probes = chunked_each + check::probe_total(ctx.prober) as u64;
+    if let Some(bar) = &ctx.progress {
+        bar.inc(1);
+    }
+    (
+        timestamp,
+        ScanOutcome {
+            failed: chunked.failed + full.failed,
+            hits: full.hits,
+        },
+        probes,
+    )
+}
+
+/// Scan in order, stopping at the first timestamp with a hit.
+///
+/// Timestamps stream through an ordered `buffered` window, so `--threads`
+/// bounds real concurrency (via the shared prober) and dropping the stream
+/// on the first hit cancels in-flight work.
+async fn scan_first(ctx: ScanCtx<'_>) -> Result<Outcome> {
+    let window = usize::from(ctx.opts.threads).max(1);
+    let mut results = stream::iter(ctx.from..=ctx.to)
+        .map(|timestamp| probe_timestamp(&ctx, timestamp))
+        .buffered(window);
+
+    let mut failed_total = 0_u64;
+    let mut probe_total = 0_u64;
+    while let Some((timestamp, outcome, probes)) = results.next().await {
+        probe_total += probes;
+        failed_total += outcome.failed;
         if outcome.hits.is_empty() {
             continue;
         }
-        let full = check::check_availability(client, username, id, timestamp, threads).await;
-        failed_total += full.failed;
-        if let Some(bar) = &progress {
+        if let Some(bar) = &ctx.progress {
             bar.finish_with_message("Search complete");
         }
-        eprintln!(
-            "Found VOD at timestamp {timestamp} ({})",
-            format_utc(timestamp)
+        note(
+            ctx.progress.as_ref(),
+            format!(
+                "Found VOD at timestamp {timestamp} ({})",
+                format_utc(timestamp)
+            ),
         );
-        for info in &full.hits {
-            emit_hit(info, flags.simple);
+        for info in &outcome.hits {
+            emit_hit(
+                ctx.progress.as_ref(),
+                info,
+                ctx.opts.simple,
+                ctx.opts.json,
+                Some(timestamp),
+            );
         }
-        if !full.hits.is_empty() {
-            suggest_player(&full.hits[0].playlist_url, flags.simple);
-        }
+        suggest_player(&outcome.hits[0].playlist_url, ctx.opts.simple);
         if failed_total > 0 {
-            eprintln!("Warning: {failed_total} probes failed; results may be incomplete.");
+            note(
+                ctx.progress.as_ref(),
+                format!("Warning: {failed_total} probes failed; results may be incomplete."),
+            );
         }
-        return Ok(());
+        return Ok(Outcome::Found);
     }
+    drop(results);
 
-    if let Some(bar) = progress {
+    if let Some(bar) = ctx.progress {
         bar.finish_with_message("Search complete");
+    }
+    if probe_total > 0 && failed_total == probe_total {
+        anyhow::bail!("All {probe_total} probes failed; check your connection and try again.");
     }
     if failed_total > 0 {
         eprintln!("Warning: {failed_total} probes failed; results may be incomplete.");
     }
     eprintln!("Could not find any available VODs in the specified range.");
     hint("check the channel name and timestamps, or try `live` for a live stream");
-    Ok(())
+    Ok(Outcome::NotFound)
 }
 
 /// Scan concurrently, reporting every hit.
-async fn scan_all(
-    client: &Client,
-    username: &str,
-    id: i64,
-    timestamps: Vec<i64>,
-    threads: usize,
-    progress: Option<indicatif::ProgressBar>,
-    flags: &Cli,
-) -> Result<()> {
-    let mut probed: Vec<(i64, ScanOutcome)> = stream::iter(timestamps)
-        .map(|timestamp| {
-            let client = client.clone();
-            let progress = progress.clone();
-            async move {
-                let chunked =
-                    check::check_qualities(&client, username, id, timestamp, &["chunked"], threads)
-                        .await;
-                let outcome = if chunked.hits.is_empty() {
-                    chunked
-                } else {
-                    let full =
-                        check::check_availability(&client, username, id, timestamp, threads).await;
-                    ScanOutcome {
-                        failed: chunked.failed + full.failed,
-                        hits: full.hits,
-                    }
-                };
-                if let Some(bar) = &progress {
-                    bar.inc(1);
-                }
-                (timestamp, outcome)
-            }
-        })
-        .buffer_unordered(threads)
-        .collect()
-        .await;
-
-    probed.sort_by_key(|(timestamp, _)| *timestamp);
-    if let Some(bar) = &progress {
-        bar.finish_with_message("Search complete");
-    }
+///
+/// Results stream through an ordered `buffered` window, so hits print as
+/// they arrive in timestamp order instead of buffering every outcome. The
+/// outer window only bounds task count; the prober's semaphore bounds
+/// actual requests, so `--threads` is honored however scans nest.
+async fn scan_all(ctx: ScanCtx<'_>) -> Result<Outcome> {
+    let window = usize::from(ctx.opts.threads).max(1);
+    let mut results = stream::iter(ctx.from..=ctx.to)
+        .map(|timestamp| probe_timestamp(&ctx, timestamp))
+        .buffered(window);
 
     let mut found = 0_usize;
     let mut failed_total = 0_u64;
+    let mut probe_total = 0_u64;
     let mut first_url = None;
-    for (timestamp, outcome) in &probed {
+    while let Some((timestamp, outcome, probes)) = results.next().await {
+        probe_total += probes;
         failed_total += outcome.failed;
         if outcome.hits.is_empty() {
             continue;
         }
         found += 1;
-        eprintln!("Timestamp {timestamp} ({}):", format_utc(*timestamp));
+        note(
+            ctx.progress.as_ref(),
+            format!("Timestamp {timestamp} ({}):", format_utc(timestamp)),
+        );
         for info in &outcome.hits {
-            emit_hit(info, flags.simple);
+            emit_hit(
+                ctx.progress.as_ref(),
+                info,
+                ctx.opts.simple,
+                ctx.opts.json,
+                Some(timestamp),
+            );
             if first_url.is_none() {
                 first_url = Some(info.playlist_url.clone());
             }
         }
     }
 
+    if let Some(bar) = &ctx.progress {
+        bar.finish_with_message("Search complete");
+    }
+
+    if probe_total > 0 && failed_total == probe_total {
+        anyhow::bail!("All {probe_total} probes failed; check your connection and try again.");
+    }
     if failed_total > 0 {
         eprintln!("Warning: {failed_total} probes failed; results may be incomplete.");
     }
     if found == 0 {
         eprintln!("Could not find any available VODs in the specified range.");
         hint("check the channel name and timestamps, or try `live` for a live stream");
+        Ok(Outcome::NotFound)
     } else {
         eprintln!("Found {found} timestamps with playable playlists.");
         if let Some(url) = first_url {
-            suggest_player(&url, flags.simple);
+            suggest_player(&url, ctx.opts.simple);
+        }
+        Ok(Outcome::Found)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    /// Serve 200 for playlist paths of `target`, 404 for everything else.
+    fn serve_gated(target: i64) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let addr = listener.local_addr().expect("read local addr");
+        let marker = format!("_{target}/");
+        std::thread::spawn(move || {
+            for _ in 0..400 {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    break;
+                };
+                let marker = marker.clone();
+                std::thread::spawn(move || {
+                    let mut request = [0_u8; 2048];
+                    let _ = stream.read(&mut request);
+                    let head = String::from_utf8_lossy(&request);
+                    let path = head.split_whitespace().nth(1).unwrap_or_default();
+                    let (status, reason) = if path.contains(&marker) {
+                        ("200", "OK")
+                    } else {
+                        ("404", "Not Found")
+                    };
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 {status} {reason}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                    );
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    fn scan_ctx<'a>(
+        prober: &'a Prober,
+        username: &'a str,
+        opts: &'a GlobalOpts,
+        from: i64,
+        to: i64,
+    ) -> ScanCtx<'a> {
+        ScanCtx {
+            prober,
+            username,
+            id: 1,
+            from,
+            to,
+            progress: None,
+            opts,
         }
     }
-    Ok(())
+
+    #[tokio::test]
+    async fn scan_first_stops_at_hit() {
+        let target = 1_790_752_835_i64;
+        let base = serve_gated(target);
+        let prober = Prober::with_hosts(Client::new(), 8, [base]);
+        let username = "arquel".to_string();
+        let opts = GlobalOpts::default();
+        let ctx = scan_ctx(&prober, &username, &opts, target - 2, target + 2);
+        assert_eq!(scan_first(ctx).await.expect("scan runs"), Outcome::Found);
+    }
+
+    #[tokio::test]
+    async fn scan_first_misses_cleanly() {
+        let base = serve_gated(9_999_999_999);
+        let prober = Prober::with_hosts(Client::new(), 8, [base]);
+        let username = "arquel".to_string();
+        let opts = GlobalOpts::default();
+        let ctx = scan_ctx(&prober, &username, &opts, 1_790_752_800, 1_790_752_810);
+        assert_eq!(scan_first(ctx).await.expect("scan runs"), Outcome::NotFound);
+    }
+
+    #[tokio::test]
+    async fn scan_all_reports_hits() {
+        let target = 1_790_752_835_i64;
+        let base = serve_gated(target);
+        let prober = Prober::with_hosts(Client::new(), 8, [base]);
+        let username = "arquel".to_string();
+        let opts = GlobalOpts::default();
+        let ctx = scan_ctx(&prober, &username, &opts, target - 2, target + 2);
+        assert_eq!(scan_all(ctx).await.expect("scan runs"), Outcome::Found);
+    }
+
+    #[tokio::test]
+    async fn scan_all_misses_cleanly() {
+        let base = serve_gated(9_999_999_999);
+        let prober = Prober::with_hosts(Client::new(), 8, [base]);
+        let username = "arquel".to_string();
+        let opts = GlobalOpts::default();
+        let ctx = scan_ctx(&prober, &username, &opts, 1_790_752_800, 1_790_752_810);
+        assert_eq!(scan_all(ctx).await.expect("scan runs"), Outcome::NotFound);
+    }
 }

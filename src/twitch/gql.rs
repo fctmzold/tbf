@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
-use crate::twitch::retry::{check_http_status, classify_request, with_retry, Failure};
+use crate::twitch::retry::{Failure, check_http_status, classify_request, with_retry};
 
 /// Shared Twitch GraphQL endpoint.
 pub const GQL_ENDPOINT: &str = "https://gql.twitch.tv/gql";
@@ -43,13 +43,13 @@ struct GqlStream {
 }
 
 /// Extract the broadcast ID and start timestamp from a stream info response.
-fn extract_stream_info(response: GqlStreamInfoResponse) -> Result<Option<(i64, String)>> {
+fn extract_stream_info(response: GqlStreamInfoResponse) -> Result<Option<(u64, String)>> {
     if let Some(data) = response.data {
         if let Some(user) = data.user {
             if let Some(stream) = user.stream {
                 let id = stream
                     .id
-                    .parse::<i64>()
+                    .parse::<u64>()
                     .context("Invalid stream ID format")?;
                 return Ok(Some((id, stream.created_at)));
             }
@@ -153,7 +153,7 @@ fn extract_vod_token(response: GqlVodTokenResponse) -> Option<(String, String)> 
 ///
 /// Returns an error when the GQL request fails, the response cannot be
 /// parsed, or the stream ID is not numeric.
-pub async fn get_stream_info(client: &Client, username: &str) -> Result<Option<(i64, String)>> {
+pub async fn get_stream_info(client: &Client, username: &str) -> Result<Option<(u64, String)>> {
     const QUERY: &str =
         "query($login: String!) { user(login: $login) { stream { id createdAt } } }";
 

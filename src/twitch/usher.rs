@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use m3u8_rs::{parse_playlist_res, Playlist};
+use m3u8_rs::{Playlist, parse_playlist_res};
 use url::Url;
 
 /// One playable variant from a master manifest.

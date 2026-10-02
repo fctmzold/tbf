@@ -2,14 +2,16 @@ use std::collections::HashMap;
 
 use anyhow::{Context, Result};
 use futures::stream::{self, StreamExt};
-use m3u8_rs::{parse_playlist_res, Playlist};
+use m3u8_rs::{Playlist, parse_playlist_res};
 use reqwest::Client;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use url::Url;
 
-use crate::cli::Cli;
-use crate::twitch::check::{probe_head, Probe};
+use crate::cli::GlobalOpts;
+use crate::commands::Outcome;
+use crate::twitch::check::{Probe, Prober};
+use crate::twitch::retry::{check_http_status, classify_request, with_retry};
 
 /// Build the muted alternative for a segment URL, if it is an unmuted file.
 ///
@@ -79,7 +81,7 @@ fn create_output(output: Option<String>, force: bool) -> Result<File> {
 /// * `url` - Source `index-dvr.m3u8` URL.
 /// * `output` - Output path, defaults to `fixed_playlist.m3u8`.
 /// * `force` - Overwrite the output file when it exists.
-/// * `flags` - Global CLI flags controlling concurrency.
+/// * `opts` - Global CLI options controlling concurrency.
 ///
 /// # Errors
 ///
@@ -90,20 +92,27 @@ pub async fn execute(
     url: &str,
     output: Option<String>,
     force: bool,
-    flags: &Cli,
-) -> Result<()> {
+    opts: &GlobalOpts,
+) -> Result<Outcome> {
     let output_name = output
         .clone()
         .unwrap_or_else(|| "fixed_playlist.m3u8".to_string());
 
-    let response = client
-        .get(url)
-        .send()
-        .await
-        .context("Failed to fetch playlist")?;
-    if !response.status().is_success() {
-        anyhow::bail!("Playlist fetch failed with status {}", response.status());
+    // Refuse early: no probing when the output path is already taken.
+    if !force && std::path::Path::new(&output_name).exists() {
+        anyhow::bail!("Refusing to overwrite existing file: {output_name} (use --force)");
     }
+
+    let response = with_retry(
+        || async {
+            let response = client.get(url).send().await.map_err(classify_request)?;
+            check_http_status(response.status())?;
+            Ok(response)
+        },
+        3,
+    )
+    .await
+    .context("Failed to fetch playlist")?;
     let body = response
         .text()
         .await
@@ -136,18 +145,23 @@ pub async fn execute(
         .collect();
 
     let candidate_count = candidates.len();
+    if candidates.is_empty() {
+        eprintln!("No unmuted segments found; nothing to fix.");
+        return Ok(Outcome::NotFound);
+    }
+    let prober = Prober::new(client.clone(), usize::from(opts.threads));
     let checked: Vec<(usize, Option<String>, bool)> = stream::iter(candidates)
         .map(|(index, muted)| {
-            let client = client.clone();
+            let prober = prober.clone();
             async move {
-                match probe_head(&client, muted.as_str()).await {
+                match prober.probe_head(muted.as_str()).await {
                     Probe::Hit => (index, Some(muted.to_string()), false),
                     Probe::Miss => (index, None, false),
                     Probe::Failed => (index, None, true),
                 }
             }
         })
-        .buffer_unordered(usize::from(flags.threads))
+        .buffer_unordered(usize::from(opts.threads))
         .collect()
         .await;
 
@@ -169,17 +183,19 @@ pub async fn execute(
             .unwrap_or_else(|| absolute_uris[index].clone());
     }
 
-    let mut file = create_output(output, force)?;
+    // Serialize before creating the file so a failure leaves no empty
+    // file behind; the atomic `create_new` below still guards the race.
     let mut buffer = Vec::new();
     playlist
         .write_to(&mut buffer)
         .context("Failed to write M3U8 to buffer")?;
+    let mut file = create_output(output, force)?;
     file.write_all(&buffer).context("Failed to write to file")?;
 
     eprintln!(
         "Swapped {swapped} of {candidate_count} unmuted segments to muted ({failed} probes failed); saved to: {output_name}",
     );
-    Ok(())
+    Ok(Outcome::Found)
 }
 
 #[cfg(test)]
@@ -223,29 +239,110 @@ mod tests {
 
     #[test]
     fn creates_missing_output_file() {
-        let path = std::env::temp_dir().join("tbf-fix-missing-output.m3u8");
-        let _ = std::fs::remove_file(&path);
+        let dir = tempfile::tempdir().expect("temp dir creates");
+        let path = dir.path().join("missing-output.m3u8");
         create_output(Some(path.to_string_lossy().to_string()), false)
             .expect("missing file is created");
         assert!(path.exists());
-        std::fs::remove_file(&path).expect("fixture cleanup");
     }
 
     #[test]
     fn rejects_existing_output_file() {
-        let path = std::env::temp_dir().join("tbf-fix-clobber-test.m3u8");
+        let dir = tempfile::tempdir().expect("temp dir creates");
+        let path = dir.path().join("clobber-test.m3u8");
         std::fs::write(&path, "data").expect("fixture writes");
         let error = create_output(Some(path.to_string_lossy().to_string()), false)
             .expect_err("existing file is rejected");
         assert!(error.to_string().contains("Refusing to overwrite"));
-        std::fs::remove_file(&path).expect("fixture cleanup");
     }
 
     #[test]
     fn force_overwrites_existing_file() {
-        let path = std::env::temp_dir().join("tbf-fix-force-test.m3u8");
+        let dir = tempfile::tempdir().expect("temp dir creates");
+        let path = dir.path().join("force-test.m3u8");
         std::fs::write(&path, "data").expect("fixture writes");
         create_output(Some(path.to_string_lossy().to_string()), true).expect("force overwrites");
-        std::fs::remove_file(&path).expect("fixture cleanup");
+    }
+
+    /// Serve a playlist plus one muted segment from a background thread.
+    fn serve_fix_playlist() -> String {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        const PLAYLIST: &str = "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:6\n#EXTINF:6.0,\n1-unmuted.ts\n#EXT-X-ENDLIST\n";
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let addr = listener.local_addr().expect("read local addr");
+        std::thread::spawn(move || {
+            // One playlist fetch plus one muted-segment probe.
+            for _ in 0..2 {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    break;
+                };
+                let mut request = [0_u8; 1024];
+                let _ = stream.read(&mut request);
+                let head = String::from_utf8_lossy(&request);
+                let mut parts = head.split_whitespace();
+                let (method, path) = (
+                    parts.next().unwrap_or_default(),
+                    parts.next().unwrap_or_default(),
+                );
+                let (status, body) = if method == "GET" && path.ends_with(".m3u8") {
+                    ("200 OK", PLAYLIST)
+                } else if path.ends_with("1-muted.ts") {
+                    ("200 OK", "")
+                } else {
+                    ("404 Not Found", "")
+                };
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    fn test_opts() -> crate::cli::GlobalOpts {
+        crate::cli::GlobalOpts::default()
+    }
+
+    #[tokio::test]
+    async fn swaps_muted_segment_end_to_end() {
+        let base = serve_fix_playlist();
+        let dir = tempfile::tempdir().expect("temp dir creates");
+        let out = dir.path().join("fixed.m3u8");
+        let client = reqwest::Client::new();
+        let outcome = super::execute(
+            &client,
+            &format!("{base}/vod.m3u8"),
+            Some(out.to_string_lossy().to_string()),
+            false,
+            &test_opts(),
+        )
+        .await
+        .expect("fix succeeds");
+        assert_eq!(outcome, crate::commands::Outcome::Found);
+        let saved = std::fs::read_to_string(&out).expect("output written");
+        assert!(saved.contains("1-muted.ts"), "muted segment swaps in");
+        assert!(!saved.contains("1-unmuted.ts"), "unmuted segment swaps out");
+    }
+
+    #[tokio::test]
+    async fn refuses_existing_output_before_probing() {
+        let dir = tempfile::tempdir().expect("temp dir creates");
+        let out = dir.path().join("fixed.m3u8");
+        std::fs::write(&out, "data").expect("fixture writes");
+        let client = reqwest::Client::new();
+        let error = super::execute(
+            &client,
+            "http://127.0.0.1:9/vod.m3u8",
+            Some(out.to_string_lossy().to_string()),
+            false,
+            &test_opts(),
+        )
+        .await
+        .expect_err("existing output refuses");
+        assert!(error.to_string().contains("Refusing to overwrite"));
     }
 }

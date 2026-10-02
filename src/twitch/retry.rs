@@ -5,18 +5,31 @@ use anyhow::Result;
 /// Whether a failed operation is worth retrying.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Failure {
-    /// May succeed later (timeout, 429, 5xx, connection reset).
+    /// May succeed later (timeout, 429, 5xx, reset connection).
     Transient,
-    /// Will never succeed (4xx, bad data, unknown channel).
+    /// Rate limited, but the wait was already served: retry immediately.
+    RateLimited,
+    /// Will never succeed (request could not even be built, redirect loop).
     Permanent,
 }
 
+/// Spread for the random backoff jitter, in milliseconds.
+const JITTER_MILLIS: u64 = 100;
+
 /// Classify a request error for retries.
+///
+/// Only errors proving the request itself is broken are permanent; transport
+/// failures (timeouts, resets, refused or dropped connections) may succeed
+/// on a later attempt.
+///
+/// # Arguments
+///
+/// * `error` - Request error from `reqwest`.
 pub fn classify_request(error: reqwest::Error) -> (Failure, anyhow::Error) {
-    if error.is_timeout() {
-        (Failure::Transient, error.into())
-    } else {
+    if error.is_builder() || error.is_redirect() {
         (Failure::Permanent, error.into())
+    } else {
+        (Failure::Transient, error.into())
     }
 }
 
@@ -30,6 +43,9 @@ pub fn classify_request(error: reqwest::Error) -> (Failure, anyhow::Error) {
 ///
 /// `Ok` for 2xx, retryable transient error for 429/5xx, permanent error
 /// otherwise.
+///
+/// Note: 429s from `Prober` arrive as [`Failure::RateLimited`] instead,
+/// since the `Retry-After` wait is served before classifying.
 pub fn check_http_status(status: reqwest::StatusCode) -> Result<(), (Failure, anyhow::Error)> {
     if status.is_success() {
         Ok(())
@@ -46,9 +62,39 @@ pub fn check_http_status(status: reqwest::StatusCode) -> Result<(), (Failure, an
     }
 }
 
-/// Backoff between retries.
+/// Backoff between retries: exponential base plus jitter.
+///
+/// The jitter spreads tasks that failed together so their retries do not
+/// re-collide on the same instant.
+///
+/// # Arguments
+///
+/// * `attempt` - Zero-based attempt that just failed.
 fn backoff(attempt: u32) -> Duration {
-    Duration::from_millis(200 * 4_u64.pow(attempt))
+    let base = Duration::from_millis(200 * 4_u64.pow(attempt.min(8)));
+    base + Duration::from_millis(fastrand::u64(0..=JITTER_MILLIS))
+}
+
+/// Honor a `Retry-After` delay on a 429 response, capped at one minute.
+///
+/// Only delta-seconds values are supported; HTTP dates fall back to the
+/// regular backoff.
+///
+/// # Arguments
+///
+/// * `response` - Response carrying the 429 status.
+///
+/// # Returns
+///
+/// Waited seconds, or `None` when the header is missing or unparsable.
+pub(crate) fn retry_after_secs(response: &reqwest::Response) -> Option<u64> {
+    response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .filter(|&seconds| seconds > 0)
+        .map(|seconds| seconds.min(60))
 }
 
 /// Run an operation with retries for transient failures.
@@ -79,6 +125,11 @@ where
         match operation().await {
             Ok(value) => return Ok(value),
             Err((Failure::Permanent, error)) => return Err(error),
+            Err((Failure::RateLimited, error)) => {
+                // The wait was already served (e.g. `Retry-After`); retry
+                // at once instead of stacking another backoff on top.
+                last_error = Some(error);
+            }
             Err((Failure::Transient, error)) => {
                 last_error = Some(error);
                 if attempt + 1 < attempts {
@@ -93,8 +144,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[tokio::test]
     async fn permanent_failure_skips_retries() {
@@ -116,7 +167,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn transient_failure_retries_then_succeeds() {
+    async fn rate_limited_retries_without_backoff() {
+        // No sleeps are involved, so this runs in real time.
         let calls = Arc::new(AtomicUsize::new(0));
         let worker = calls.clone();
         let result = with_retry(
@@ -125,7 +177,7 @@ mod tests {
                 async move {
                     let call = worker.fetch_add(1, Ordering::SeqCst);
                     if call < 2 {
-                        Err((Failure::Transient, anyhow::anyhow!("busy")))
+                        Err((Failure::RateLimited, anyhow::anyhow!("slow down")))
                     } else {
                         Ok(42)
                     }
@@ -136,5 +188,74 @@ mod tests {
         .await;
         assert_eq!(result.expect("succeeds on third try"), 42);
         assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn transient_failure_retries_then_succeeds() {
+        tokio::time::pause();
+        let worker = Arc::new(AtomicUsize::new(0));
+        let task = worker.clone();
+        let handle = tokio::spawn(async move {
+            with_retry(
+                move || {
+                    let task = task.clone();
+                    async move {
+                        let call = task.fetch_add(1, Ordering::SeqCst);
+                        if call < 2 {
+                            Err((Failure::Transient, anyhow::anyhow!("busy")))
+                        } else {
+                            Ok(42)
+                        }
+                    }
+                },
+                3,
+            )
+            .await
+        });
+        tokio::time::advance(Duration::from_secs(120)).await;
+        let result = handle.await.expect("retries complete");
+        assert_eq!(result.expect("succeeds on third try"), 42);
+        assert_eq!(worker.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn backoff_grows_with_jitter_bounds() {
+        for (attempt, base) in [(0, 200), (1, 800), (2, 3200)] {
+            let delay = backoff(attempt);
+            assert!(delay >= Duration::from_millis(base), "attempt {attempt}");
+            assert!(
+                delay <= Duration::from_millis(base + JITTER_MILLIS),
+                "attempt {attempt}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn refused_connection_is_transient() {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("bind loopback")
+            .local_addr()
+            .expect("read local addr")
+            .port();
+        let client = reqwest::Client::new();
+        let error = client
+            .get(format!("http://127.0.0.1:{port}/x"))
+            .send()
+            .await
+            .expect_err("refused port errors");
+        assert!(!error.is_builder() && !error.is_redirect());
+        assert_eq!(classify_request(error).0, Failure::Transient);
+    }
+
+    #[tokio::test]
+    async fn unbuildable_request_is_permanent() {
+        let client = reqwest::Client::new();
+        let error = client
+            .get("ht tp://not a url")
+            .send()
+            .await
+            .expect_err("bad URL errors");
+        assert!(error.is_builder());
+        assert_eq!(classify_request(error).0, Failure::Permanent);
     }
 }

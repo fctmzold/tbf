@@ -3,7 +3,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
 use crate::twitch::gql::GQL_ENDPOINT;
-use crate::twitch::retry::{check_http_status, classify_request, with_retry, Failure};
+use crate::twitch::retry::{Failure, check_http_status, classify_request, with_retry};
 
 /// Twitch persisted-query hash for channel video listings.
 ///
@@ -15,26 +15,8 @@ const VIDEO_TOWER_OPERATION: &str = "FilterableVideoTower_Videos";
 ///
 /// Deliberately different from the GQL client ID: persisted queries only
 /// work with client IDs Twitch whitelisted for them.
-const GQL_CLIENT_ID: &str = "ue6666qo983tsx6so1t0vnawi233wa";
+const PERSISTED_QUERY_CLIENT_ID: &str = "ue6666qo983tsx6so1t0vnawi233wa";
 const PAGE_SIZE: u32 = 100;
-
-/// Map a `--type` filter name to the API broadcast type.
-///
-/// # Arguments
-///
-/// * `name` - `all`, `archive`, `highlight`, or `upload`.
-///
-/// # Returns
-///
-/// API value, or `None` for unfiltered listings.
-pub fn broadcast_filter(name: &str) -> Option<&'static str> {
-    match name {
-        "archive" => Some("ARCHIVE"),
-        "highlight" => Some("HIGHLIGHT"),
-        "upload" => Some("UPLOAD"),
-        _ => None,
-    }
-}
 
 /// Format seconds as `H:MM:SS` or `M:SS` for list output.
 ///
@@ -229,6 +211,12 @@ fn parse_videos_page(body: &str, channel: &str) -> Result<VideosPage> {
         .context("Empty video listing response")?;
     if let Some(errors) = result.errors {
         if !errors.is_null() {
+            if errors.to_string().contains("PersistedQueryNotFound") {
+                anyhow::bail!(
+                    "Video listing query failed: {errors} \
+                     (the persisted-query hash likely rotated; update VIDEO_TOWER_HASH)"
+                );
+            }
             anyhow::bail!("Video listing query failed: {errors}");
         }
     }
@@ -311,7 +299,7 @@ pub async fn fetch_videos_page(
         || async {
             let response = client
                 .post(GQL_ENDPOINT)
-                .header("Client-ID", GQL_CLIENT_ID)
+                .header("Client-ID", PERSISTED_QUERY_CLIENT_ID)
                 .header("Content-Type", "text/plain;charset=UTF-8")
                 .body(body.clone())
                 .send()
@@ -341,7 +329,8 @@ pub async fn fetch_videos_page(
 ///
 /// * `client` - Shared HTTP client.
 /// * `channel` - Channel login name.
-/// * `broadcast_type` - API filter (see `broadcast_filter`).
+/// * `broadcast_type` - API filter (`ARCHIVE`, `HIGHLIGHT`, `UPLOAD`), or
+///   `None` for everything.
 ///
 /// # Returns
 ///
@@ -450,12 +439,10 @@ mod tests {
     }
 
     #[test]
-    fn broadcast_filter_maps_names() {
-        assert_eq!(broadcast_filter("archive"), Some("ARCHIVE"));
-        assert_eq!(broadcast_filter("highlight"), Some("HIGHLIGHT"));
-        assert_eq!(broadcast_filter("upload"), Some("UPLOAD"));
-        assert_eq!(broadcast_filter("all"), None);
-        assert_eq!(broadcast_filter("bogus"), None);
+    fn stale_hash_hint_names_the_constant() {
+        let body = r#"[{"errors": [{"message": "PersistedQueryNotFound"}], "data": null}]"#;
+        let error = parse_videos_page(body, "arquel").expect_err("stale hash fails");
+        assert!(error.to_string().contains("VIDEO_TOWER_HASH"));
     }
 
     #[test]

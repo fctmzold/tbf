@@ -43,10 +43,7 @@ pub fn scanning_progress(
 /// * `bar` - Active progress bar, if any.
 /// * `message` - Complete message printed as one block.
 pub fn emit(bar: Option<&ProgressBar>, message: String) {
-    match bar {
-        Some(bar) => bar.println(message),
-        None => println!("{message}"),
-    }
+    crate::report::note(bar, message);
 }
 
 #[cfg(test)]
